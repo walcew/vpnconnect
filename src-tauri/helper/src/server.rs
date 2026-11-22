@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::engine::Credentials;
 use crate::net::{self, SystemOs};
 use crate::protocol::{Frame, FrameKind, Request, Response, PROTOCOL_VERSION};
 use crate::session::{Event, Session};
@@ -158,7 +159,7 @@ fn handle_request(session: &Arc<Session>, parsed: serde_json::Result<Value>) -> 
             session.cancel();
             Response::ok(None)
         }
-        Ok(Request::Connect { profile, password, otp }) => match session.connect(*profile, password, otp) {
+        Ok(Request::Connect { profile, password, otp }) => match session.connect(*profile, Credentials { password, otp }) {
             Ok(()) => Response::ok(None),
             Err(e) => Response::error(e),
         },

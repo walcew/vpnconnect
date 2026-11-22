@@ -1,10 +1,14 @@
+mod browser_login;
+mod engine;
 mod fortinet;
 mod net;
+mod profile;
 mod protocol;
 mod server;
 mod session;
 #[cfg(test)]
 mod testing;
+mod tls;
 mod validation;
 
 use std::fs;

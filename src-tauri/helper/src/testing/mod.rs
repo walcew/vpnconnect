@@ -15,9 +15,10 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
 use tokio_rustls::rustls::RootCertStore;
 
-use crate::fortinet::CertTrust;
+use crate::engine::Tuning;
 use crate::server::{bind, serve, Authorizer};
 use crate::session::Session;
+use crate::tls::CertTrust;
 use fake_os::FakeOs;
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -76,7 +77,7 @@ pub async fn start_with_roots(roots: RootCertStore) -> (PathBuf, Arc<Session>) {
 /// Como `start_with_os`, com um prazo curto para o push.
 pub async fn start_with_push_timeout(timeout: Duration) -> (PathBuf, Arc<Session>, Arc<FakeOs>) {
     let os = Arc::new(FakeOs::default());
-    let (path, session) = start_session(allow_all(), Session::new(os.clone()).with_push_timeout(timeout)).await;
+    let (path, session) = start_session(allow_all(), Session::new(os.clone()).with_tuning(Tuning { push_timeout: Some(timeout), ..Default::default() })).await;
     (path, session, os)
 }
 
@@ -90,7 +91,7 @@ pub async fn start_with_bandwidth_interval(interval: Duration) -> (PathBuf, Arc<
 /// Como `start_with_os`, com o LCP echo neste intervalo em vez de a cada 10 s.
 pub async fn start_with_echo_interval(interval: Duration) -> (PathBuf, Arc<Session>, Arc<FakeOs>) {
     let os = Arc::new(FakeOs::default());
-    let (path, session) = start_session(allow_all(), Session::new(os.clone()).with_echo_interval(interval)).await;
+    let (path, session) = start_session(allow_all(), Session::new(os.clone()).with_tuning(Tuning { keepalive: Some(interval), ..Default::default() })).await;
     (path, session, os)
 }
 

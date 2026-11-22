@@ -6,26 +6,17 @@ mod ppp;
 mod saml;
 mod xml;
 
-pub use http::CertTrust;
-
-/// Emite uma linha como evento de log da sessão.
-pub type LogFn = Arc<dyn Fn(String) + Send + Sync>;
-
-use std::net::Ipv4Addr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Notify};
-use tokio::task::JoinHandle;
-use tokio_rustls::client::TlsStream;
-use tokio_rustls::rustls::pki_types::ServerName;
-use tokio_rustls::TlsConnector;
 
+use crate::browser_login;
+use crate::engine::{self, Credentials, LogFn, LoginError, Tuning, Tunnel, Waiting};
 use crate::net::{Packets, TunnelConfig};
-use crate::validation::is_valid_hostname;
+use crate::profile::{Auth, Profile};
+use crate::tls::GatewayTls;
 
 const DEFAULT_MTU: u16 = 1354;
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -44,54 +35,17 @@ const DEFAULT_SAML_TIMEOUT: u64 = 120;
 /// Passo comum do FortiClient depois do SAML: `logincheck` sem credencial.
 const SAML_LOGINCHECK: &str = "username=&credential=&just_logged_in=1&redir=%2Fremote%2Findex&ajax=1";
 
-/// Métodos de autenticação que o Engine já fala.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Auth {
-    Password,
-    /// Navegador externo; sem username nem senha.
-    Saml,
-}
-
-/// O Profile como chega no `connect`. Só o que o Engine usa; o resto é ignorado.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Profile {
-    pub id: String,
-    pub host: String,
-    pub port: u16,
-    pub auth: Auth,
-    /// Vazio no SAML.
-    #[serde(default)]
-    pub username: String,
-    #[serde(default)]
-    pub trusted_certs: Vec<String>,
-    /// Auto-trust: aceita qualquer certificado, só deste host.
-    #[serde(default)]
-    pub ignore_cert_errors: bool,
-    /// Split DNS do Profile: se houver, só estes domínios usam o DNS da VPN, no lugar
-    /// dos sufixos do gateway. Vazio mantém os sufixos do gateway.
-    #[serde(default)]
-    pub dns_match_domains: Vec<String>,
-    /// DNS do sistema lido pela GUI antes de conectar (vazio com o fallback desligado ou
-    /// sem DNS no sistema). Só valem, com os do Google, se o gateway não mandar servidor.
-    #[serde(default)]
-    pub dns_fallback_servers: Vec<Ipv4Addr>,
-    /// Realm do login por senha; ausente ou vazio manda `realm=` vazio.
-    #[serde(default)]
-    pub realm: Option<String>,
-}
-
 const MAX_REALM_LEN: usize = 64;
 
 /// O gateway pediu o segundo fator (OTP ou push) no primeiro passo do login.
-pub struct Challenge {
+struct Challenge {
     fields: Vec<(&'static str, String)>,
     /// O gateway oferece aprovação por push do FortiToken Mobile.
-    pub push: bool,
+    push: bool,
 }
 
 /// Resultado do primeiro passo do login.
-pub enum Login {
+enum Login {
     Cookie(String),
     Challenge(Challenge),
 }
@@ -122,110 +76,43 @@ fn parse_pairs(body: &[u8]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Endereço e TLS de um gateway.
-pub struct Gateway {
+/// O Engine Fortinet de um `connect`: o gateway do Profile e, depois do login, o cookie da sessão.
+pub struct Fortinet {
     host: String,
     port: u16,
+    auth: Auth,
+    username: String,
     realm: String,
-    server_name: ServerName<'static>,
-    tls: TlsConnector,
-    /// Só o auto-trust registra o digest de cada conexão.
-    auto_trust: bool,
-    trust: Arc<CertTrust>,
+    tls: Arc<GatewayTls>,
     log: LogFn,
-    /// Digest do último certificado que o verificador recusou.
-    refused: Arc<Mutex<Option<String>>>,
     push_timeout: Duration,
     echo_interval: Duration,
+    /// `SVPNCOOKIE` do login; só existe entre o login e o fim da sessão.
+    cookie: Option<String>,
 }
 
-/// A task do túnel; abortá-la (ou soltá-la) fecha a conexão TLS.
-pub struct Tunnel {
-    task: JoinHandle<String>,
-    /// Pede ao PPP um Echo-Request fora do intervalo.
-    probe: Arc<Notify>,
-}
-
-impl Tunnel {
-    /// Espera o túnel cair e devolve o motivo.
-    pub async fn closed(&mut self) -> String {
-        (&mut self.task).await.unwrap_or_else(|e| format!("Tunnel task failed: {}", e))
-    }
-
-    /// Manda um LCP Echo-Request agora, sem esperar o próximo intervalo; sem resposta, o túnel
-    /// cai como em qualquer echo perdido.
-    pub fn probe(&self) {
-        self.probe.notify_one();
-    }
-}
-
-impl Drop for Tunnel {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-impl Gateway {
-    pub fn new(profile: &Profile, trust: &Arc<CertTrust>, log: LogFn) -> Result<Self, String> {
-        if !is_valid_hostname(&profile.host) {
-            return Err(format!("Invalid host: {}", profile.host));
-        }
+impl Fortinet {
+    pub fn new(profile: &Profile, tls: Arc<GatewayTls>, log: LogFn, tuning: Tuning) -> Result<Self, String> {
         let realm = profile.realm.clone().unwrap_or_default();
         if realm.len() > MAX_REALM_LEN || realm.chars().any(char::is_control) {
             return Err("Invalid realm".into());
         }
-        let server_name = ServerName::try_from(profile.host.clone()).map_err(|e| format!("Invalid host: {}", e))?;
-        let refused = Arc::new(Mutex::new(None));
         Ok(Self {
             host: profile.host.clone(),
             port: profile.port,
+            auth: profile.auth,
+            username: profile.username.clone(),
             realm,
-            server_name,
-            tls: TlsConnector::from(Arc::new(http::client_config(profile, trust, refused.clone())?)),
-            auto_trust: profile.ignore_cert_errors,
-            trust: trust.clone(),
+            tls,
             log,
-            refused,
-            push_timeout: PUSH_TIMEOUT,
-            echo_interval: ECHO_INTERVAL,
+            push_timeout: tuning.push_timeout.unwrap_or(PUSH_TIMEOUT),
+            echo_interval: tuning.keepalive.unwrap_or(ECHO_INTERVAL),
+            cookie: None,
         })
     }
 
-    pub fn with_push_timeout(mut self, timeout: Duration) -> Self {
-        self.push_timeout = timeout;
-        self
-    }
-
-    pub fn with_echo_interval(mut self, interval: Duration) -> Self {
-        self.echo_interval = interval;
-        self
-    }
-
-    /// Digest do certificado que o verificador recusou, se foi o caso.
-    pub fn refused_digest(&self) -> Option<String> {
-        self.refused.lock().unwrap().clone()
-    }
-
-    async fn connect(&self) -> Result<TlsStream<TcpStream>, String> {
-        let tcp = TcpStream::connect((self.host.as_str(), self.port))
-            .await
-            .map_err(|e| format!("Cannot reach {}:{}: {}", self.host, self.port, e))?;
-        let stream = self
-            .tls
-            .connect(self.server_name.clone(), tcp)
-            .await
-            .map_err(|e| format!("TLS handshake failed: {}", e))?;
-        // Só depois do handshake, que prova a posse da chave: um certificado copiado não vira "troca".
-        if self.auto_trust {
-            if let Some(cert) = stream.get_ref().1.peer_certificates().and_then(|c| c.first()) {
-                if let Some((old, new)) = self.trust.record(&self.host, cert) {
-                    let line = format!("gateway certificate of {} changed: sha256 {} -> {}", self.host, old, new);
-                    log::warn!("{}", line);
-                    (self.log)(line);
-                }
-            }
-        }
-        Ok(stream)
+    fn cookie(&self) -> Result<&str, String> {
+        self.cookie.as_deref().ok_or_else(|| "Not logged in".to_string())
     }
 
     fn host_header(&self) -> String {
@@ -254,26 +141,43 @@ impl Gateway {
         } else {
             req.push_str("\r\n");
         }
-        let mut stream = self.connect().await?;
+        let mut stream = self.tls.connect().await?;
         stream.write_all(req.as_bytes()).await.map_err(|e| format!("{} {} failed: {}", method, path, e))?;
         http::read_response(&mut stream).await.map_err(|e| format!("{} {} failed: {}", method, path, e))
     }
 
+    /// Login por senha em um ou dois passos. Com o gateway pedindo token: usa o OTP se houver,
+    /// senão pede o push (e avisa a espera) quando o gateway o oferece.
+    async fn password_login(&self, credentials: &Credentials, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<String, LoginError> {
+        let challenge = match self.first_step(&credentials.password).await? {
+            Login::Cookie(cookie) => return Ok(cookie),
+            Login::Challenge(challenge) => challenge,
+        };
+        let otp = credentials.otp.as_deref().map(str::trim).filter(|o| !o.is_empty());
+        if otp.is_none() {
+            if !challenge.push {
+                return Err(LoginError::Failed("Gateway requires an OTP code but none was provided".into()));
+            }
+            waiting(Waiting::Push);
+        }
+        self.complete_challenge(&challenge, otp).await
+    }
+
     /// `POST /remote/logincheck`: devolve o `SVPNCOOKIE` ou o pedido de token do gateway.
-    pub async fn login(&self, username: &str, password: &str) -> Result<Login, String> {
+    async fn first_step(&self, password: &str) -> Result<Login, LoginError> {
         let form = format!(
             "username={}&credential={}&realm={}&just_logged_in=1&redir=%2Fremote%2Findex&ajax=1",
-            http::form_encode(username),
+            http::form_encode(&self.username),
             http::form_encode(password),
             http::form_encode(&self.realm)
         );
-        let resp = self.request("POST", "/remote/logincheck", &self.host_header(), None, Some(&form)).await?;
+        let resp = self.request("POST", "/remote/logincheck", &self.host_header(), None, Some(&form)).await.map_err(LoginError::Failed)?;
         if let Some(c) = session_cookie(&resp) {
             return Ok(Login::Cookie(c));
         }
         let pairs = parse_pairs(&resp.body);
         let Some((_, tokeninfo)) = pairs.iter().find(|(k, _)| k == "tokeninfo") else {
-            return Err("Login failed: invalid username or password".into());
+            return Err(LoginError::Refused("Login failed: invalid username or password".into()));
         };
         let fields: Vec<_> = CHALLENGE_FIELDS
             .iter()
@@ -281,15 +185,15 @@ impl Gateway {
             .collect();
         // shortcut: só `reqid` é exigido, o gateway real pode omitir os outros; apertar quando houver prova contra ele.
         if !fields.iter().any(|(k, _)| *k == "reqid") {
-            return Err("Login failed: incomplete login challenge from the gateway".into());
+            return Err(LoginError::Refused("Login failed: incomplete login challenge from the gateway".into()));
         }
         Ok(Login::Challenge(Challenge { fields, push: tokeninfo == "ftm_push" }))
     }
 
     /// Segundo passo do login: reenvia o desafio com o OTP, ou pede o push quando não há OTP.
     /// Com push a chamada espera a aprovação do usuário.
-    pub async fn complete_challenge(&self, username: &str, challenge: &Challenge, otp: Option<&str>) -> Result<String, String> {
-        let mut form = format!("username={}", http::form_encode(username));
+    async fn complete_challenge(&self, challenge: &Challenge, otp: Option<&str>) -> Result<String, LoginError> {
+        let mut form = format!("username={}", http::form_encode(&self.username));
         for (name, value) in &challenge.fields {
             form.push_str(&format!("&{}={}", name, http::form_encode(value)));
         }
@@ -300,21 +204,22 @@ impl Gateway {
         form.push_str("&just_logged_in=1&ajax=1");
         let host = self.host_header();
         let resp = match otp {
-            Some(_) => self.request("POST", "/remote/logincheck", &host, None, Some(&form)).await?,
+            Some(_) => self.request("POST", "/remote/logincheck", &host, None, Some(&form)).await,
             None => tokio::time::timeout(self.push_timeout, self.exchange("POST", "/remote/logincheck", &host, None, Some(&form)))
                 .await
-                .map_err(|_| "Login failed: push notification expired".to_string())??,
-        };
+                .map_err(|_| LoginError::Refused("Login failed: push notification expired".into()))?,
+        }
+        .map_err(LoginError::Failed)?;
         match session_cookie(&resp) {
             Some(c) => Ok(c),
-            _ if otp.is_some() => Err("Login failed: invalid or expired OTP code".into()),
-            _ => Err("Login failed: push notification was denied or expired".into()),
+            _ if otp.is_some() => Err(LoginError::Refused("Login failed: invalid or expired OTP code".into())),
+            _ => Err(LoginError::Refused("Login failed: push notification was denied or expired".into())),
         }
     }
 
     /// Login SAML pelo navegador externo. `waiting` recebe a URL que a GUI abre no navegador,
-    /// depois que o listener local já está de pé.
-    pub async fn saml_login(&self, waiting: impl FnOnce(String)) -> Result<String, String> {
+    /// depois que o listener local já está de pé. Todas as falhas são `LoginError::Failed`.
+    async fn saml_login(&self, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<String, String> {
         let host = self.host_header();
         let info = self.request("GET", "/remote/info", &host, None, None).await?;
         let body = if (200..300).contains(&info.status) { String::from_utf8_lossy(&info.body).into_owned() } else { String::new() };
@@ -331,9 +236,9 @@ impl Gateway {
         let port = port.unwrap_or(DEFAULT_SSO_PORT);
         let timeout = Duration::from_secs(secs.unwrap_or(DEFAULT_SAML_TIMEOUT));
 
-        let listener = saml::listen(port).await?;
-        waiting(format!("https://{}/remote/saml/start?redirect=1", host));
-        let id = tokio::time::timeout(timeout, saml::wait_for_id(listener))
+        let listener = browser_login::listen(port, "FortiClient").await?;
+        waiting(Waiting::Browser(format!("https://{}/remote/saml/start?redirect=1", host)));
+        let id = tokio::time::timeout(timeout, browser_login::wait_for(listener, saml::extract_id))
             .await
             .map_err(|_| format!("SAML login timed out after {} s", timeout.as_secs()))??;
 
@@ -348,10 +253,22 @@ impl Gateway {
             .await?;
         session_cookie(&resp).ok_or_else(|| "SAML login failed: the gateway returned no session cookie".into())
     }
+}
+
+impl engine::Engine for Fortinet {
+    async fn login(&mut self, credentials: &Credentials, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<(), LoginError> {
+        let cookie = match self.auth {
+            Auth::Saml => self.saml_login(waiting).await.map_err(LoginError::Failed)?,
+            Auth::Password => self.password_login(credentials, waiting).await?,
+        };
+        self.cookie = Some(cookie);
+        Ok(())
+    }
 
     /// Lê a config do túnel, abre o `sslvpn-tunnel` e negocia o PPP até o IPCP subir.
     /// `login_started` é o início do login, de onde o `auth-timeout` conta.
-    pub async fn open_tunnel(&self, cookie: &str, login_started: chrono::DateTime<chrono::Utc>) -> Result<(TunnelConfig, Packets, Tunnel), String> {
+    async fn open_tunnel(&self, login_started: chrono::DateTime<chrono::Utc>) -> Result<(TunnelConfig, Packets, Tunnel), String> {
+        let cookie = self.cookie()?;
         let resp = self.request("GET", "/remote/fortisslvpn_xml", "sslvpn", Some(&svpn_header(cookie)), None).await?;
         if resp.status != 200 {
             return Err(format!("Gateway refused the tunnel configuration (HTTP {})", resp.status));
@@ -359,7 +276,7 @@ impl Gateway {
         let xml = xml::parse(&resp.body)?;
         let mtu = xml.mtu.unwrap_or(DEFAULT_MTU);
 
-        let mut stream = tokio::time::timeout(STEP_TIMEOUT, self.connect())
+        let mut stream = tokio::time::timeout(STEP_TIMEOUT, self.tls.connect())
             .await
             .map_err(|_| "Tunnel connection timed out".to_string())??;
         let gateway = stream.get_ref().0.peer_addr().map_err(|e| e.to_string())?.ip();
@@ -371,7 +288,7 @@ impl Gateway {
         let (up_tx, up_rx) = oneshot::channel();
         let probe = Arc::new(Notify::new());
         let ppp = ppp::run(stream, mtu, self.echo_interval, probe.clone(), up_tx, to_iface, from_iface);
-        let mut tunnel = Tunnel { task: tokio::spawn(ppp), probe };
+        let mut tunnel = Tunnel::new(tokio::spawn(ppp), probe);
         let up = match tokio::time::timeout(STEP_TIMEOUT, up_rx).await {
             Ok(Ok(up)) => up,
             Ok(Err(_)) => return Err(tunnel.closed().await),
@@ -392,7 +309,8 @@ impl Gateway {
         Ok((config, Packets { tx, rx }, tunnel))
     }
 
-    pub async fn logout(&self, cookie: &str) -> Result<(), String> {
-        self.request("GET", "/remote/logout", &self.host_header(), Some(&svpn_header(cookie)), None).await.map(|_| ())
+    async fn logout(&self) -> Result<(), String> {
+        let cookie = svpn_header(self.cookie()?);
+        self.request("GET", "/remote/logout", &self.host_header(), Some(&cookie), None).await.map(|_| ())
     }
 }

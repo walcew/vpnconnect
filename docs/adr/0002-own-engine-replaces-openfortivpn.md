@@ -1,6 +1,6 @@
 # Engine Fortinet próprio no Helper substitui o openfortivpn
 
-**Status:** aceito e em vigor desde a 0.4.0. Substitui o [ADR 0001](0001-bundled-openfortivpn.md).
+**Status:** aceito e em vigor desde a 0.4.0. Substitui o [ADR 0001](0001-bundled-openfortivpn.md). O trecho "Sem trait de Engine por enquanto" foi substituído pelo [ADR 0004](0004-engine-trait-and-checkpoint-engine.md).
 
 O app depende do openfortivpn, um processo externo que o Helper dispara e só acompanha até o túnel subir. Sessão expirada vira túnel morto, o disconnect não limpa o que o pppd deixou e a senha vai na linha de comando. Decidimos escrever um **Engine** Fortinet SSL VPN em Rust, dentro do Helper, e substituir o openfortivpn de vez.
 

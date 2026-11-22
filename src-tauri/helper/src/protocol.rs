@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::fortinet::Profile;
+use crate::profile::Profile;
 use crate::session::State;
 
 // ---- Protocolo ----
