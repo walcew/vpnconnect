@@ -1,11 +1,11 @@
 ---
 name: vpnconnect
-description: "Operate the OpenFortiVpn Connect VPN (FortiGate SSL VPN on macOS) with the vpnconnect CLI: connect and disconnect a VPN, read the VPN status, follow the session live, manage Profiles (add, edit, remove, saved password, trusted certificates), change the app settings and check or install the Helper. Use when the user asks to connect or disconnect the VPN, whether the VPN is up, why the internal network, a cluster or an internal host is unreachable, or to create or change a VPN Profile."
+description: "Operate the VPN Connect VPN (FortiGate SSL VPN on macOS) with the vpnconnect CLI: connect and disconnect a VPN, read the VPN status, follow the session live, manage Profiles (add, edit, remove, saved password, trusted certificates), change the app settings and check or install the Helper. Use when the user asks to connect or disconnect the VPN, whether the VPN is up, why the internal network, a cluster or an internal host is unreachable, or to create or change a VPN Profile."
 ---
 
 # vpnconnect
 
-`vpnconnect` is the command line of OpenFortiVpn Connect. It is the app's own executable, so the app window and the CLI are equal clients of the same VPN session, which lives in the Helper (a root daemon). A session started by one shows in the other, and it stays up after the command returns or the terminal closes.
+`vpnconnect` is the command line of VPN Connect. It is the app's own executable, so the app window and the CLI are equal clients of the same VPN session, which lives in the Helper (a root daemon). A session started by one shows in the other, and it stays up after the command returns or the terminal closes.
 
 This skill ships inside the binary. `vpnconnect skill install` installs or refreshes it for every agent on this Mac; run it again after the app updates.
 

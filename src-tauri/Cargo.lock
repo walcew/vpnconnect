@@ -2587,46 +2587,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
-name = "openvpngui"
-version = "0.5.0"
-dependencies = [
- "chrono",
- "clap",
- "dirs",
- "libc",
- "log",
- "security-framework",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-notification",
- "tauri-plugin-opener",
- "tokio",
- "uuid",
- "window-vibrancy",
-]
-
-[[package]]
-name = "openvpngui-helper"
-version = "0.5.0"
-dependencies = [
- "chrono",
- "env_logger",
- "libc",
- "log",
- "rcgen",
- "roxmltree",
- "rustls",
- "rustls-platform-verifier",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-rustls",
-]
-
-[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4958,6 +4918,46 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "vpnconnect"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "dirs",
+ "libc",
+ "log",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-notification",
+ "tauri-plugin-opener",
+ "tokio",
+ "uuid",
+ "window-vibrancy",
+]
+
+[[package]]
+name = "vpnconnect-helper"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "env_logger",
+ "libc",
+ "log",
+ "rcgen",
+ "roxmltree",
+ "rustls",
+ "rustls-platform-verifier",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-rustls",
+]
 
 [[package]]
 name = "vswhom"

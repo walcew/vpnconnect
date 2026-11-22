@@ -11,7 +11,7 @@ use std::process::{Command, Output};
 use fake_helper::{event, hang_up, refusal, response, state, unauthorized, FakeHelper};
 use serde_json::{json, Value};
 
-const BIN: &str = env!("CARGO_BIN_EXE_openvpngui");
+const BIN: &str = env!("CARGO_BIN_EXE_vpnconnect");
 
 /// O diretório de teste de um caso, apagado no fim.
 struct Home(PathBuf);

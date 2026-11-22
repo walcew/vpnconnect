@@ -1,10 +1,10 @@
 [package]
-name = "openvpngui-helper"
+name = "vpnconnect-helper"
 version = "0.5.0"
 edition = "2021"
 
 [[bin]]
-name = "openvpngui-helper"
+name = "vpnconnect-helper"
 path = "src/main.rs"
 
 [dependencies]

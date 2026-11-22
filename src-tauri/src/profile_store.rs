@@ -73,7 +73,7 @@ mod tests {
 
     #[test]
     fn test_crud_operations() {
-        let dir = env::temp_dir().join(format!("openvpngui-test-{}", uuid::Uuid::new_v4()));
+        let dir = env::temp_dir().join(format!("vpnconnect-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let store = ProfileStore::with_path(dir.join("profiles.json"));
 
@@ -113,7 +113,7 @@ mod tests {
 
     #[test]
     fn test_profiles_without_otp_required_default_to_false() {
-        let dir = env::temp_dir().join(format!("openvpngui-test-{}", uuid::Uuid::new_v4()));
+        let dir = env::temp_dir().join(format!("vpnconnect-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&dir).unwrap();
         let profiles_path = dir.join("profiles.json");
         fs::write(

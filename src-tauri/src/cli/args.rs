@@ -6,8 +6,8 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "vpnconnect",
     version,
-    about = "Control the OpenFortiVpn Connect VPN session from the terminal",
-    long_about = "Control the OpenFortiVpn Connect VPN session from the terminal.\n\n\
+    about = "Control the VPN Connect VPN session from the terminal",
+    long_about = "Control the VPN Connect VPN session from the terminal.\n\n\
         The session lives in the Helper, so the app window and this CLI see and control the same \
         session. Only root and the user logged in at the console can talk to the Helper.\n\n\
         Exit codes: 0 success; 1 refused by the Helper or the gateway, or the Helper install was \

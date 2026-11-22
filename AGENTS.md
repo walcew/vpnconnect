@@ -1,4 +1,4 @@
-# OpenFortiVpn Connect
+# VPN Connect
 
 Cliente macOS para VPNs FortiGate SSL-VPN. A GUI (Tauri 2, React) e a CLI `vpnconnect` são clientes iguais do Helper, o daemon root que hospeda o Engine Fortinet próprio. A CLI é um modo do mesmo executável: com argumentos roda a CLI, sem argumentos abre a GUI.
 
@@ -7,7 +7,7 @@ Cliente macOS para VPNs FortiGate SSL-VPN. A GUI (Tauri 2, React) e a CLI `vpnco
 - Toolchain: rustup. Rode com `PATH=$HOME/.cargo/bin:$PATH`; o cargo do Homebrew quebra o `tauri-build`.
 - Testes: `cd src-tauri && cargo test --workspace`. Os e2e da CLI rodam o executável de debug com `VPNCONNECT_TEST_HOME` (só vale em debug) diante de um Helper falso.
 - Build do front: `npm run build` na raiz. O `prebuild` compila o Helper.
-- Num build limpo, rode `cd src-tauri && cargo build --release -p openvpngui-helper` antes do `cargo test` ou do `cargo build`: o `tauri.conf.json` empacota `target/release/openvpngui-helper` e o `tauri-build` falha sem ele.
+- Num build limpo, rode `cd src-tauri && cargo build --release -p vpnconnect-helper` antes do `cargo test` ou do `cargo build`: o `tauri.conf.json` empacota `target/release/vpnconnect-helper` e o `tauri-build` falha sem ele.
 
 ## Onde ler
 

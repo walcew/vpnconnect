@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-const BIN: &str = env!("CARGO_BIN_EXE_openvpngui");
+const BIN: &str = env!("CARGO_BIN_EXE_vpnconnect");
 const SKILL: &str = include_str!("../src/cli/skill/SKILL.md");
 const OUTPUT_RS: &str = include_str!("../src/cli/output.rs");
 

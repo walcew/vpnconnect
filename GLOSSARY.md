@@ -1,4 +1,4 @@
-# OpenFortiVpn Connect
+# VPN Connect
 
 Cliente macOS para VPNs FortiGate SSL-VPN, com Engine próprio rodando no Helper.
 

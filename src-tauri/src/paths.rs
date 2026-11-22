@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn write_atomic_replaces_content_and_leaves_no_temp_file() {
-        let dir = std::env::temp_dir().join(format!("openvpngui-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("vpnconnect-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("data.json");
         write_atomic(&path, "{\"a\":1}").unwrap();

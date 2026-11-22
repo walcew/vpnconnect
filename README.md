@@ -1,14 +1,14 @@
-# OpenFortiVpn Connect
+# VPN Connect
 
 A lightweight, open-source macOS GUI client for FortiGate SSL-VPN.
 
-![OpenFortiVpn Connect](docs/screenshots/openfortivpn-connect.png)
+![VPN Connect](docs/screenshots/vpnconnect.png)
 
 ## Why?
 
 If you've ever used the official FortiClient on macOS, you know the pain: bloated, buggy, and unreliable. Constant crashes, broken updates, and features you never asked for getting in the way of the one thing you need — a VPN connection.
 
-I got tired of depending on it. So I built **OpenFortiVpn Connect** — a minimal, native macOS client with its own Fortinet SSL VPN engine, written in Rust. No telemetry, no bloat, no surprises. Just a clean interface to manage your VPN profiles and connect.
+I got tired of depending on it. So I built **VPN Connect** — a minimal, native macOS client with its own Fortinet SSL VPN engine, written in Rust. No telemetry, no bloat, no surprises. Just a clean interface to manage your VPN profiles and connect.
 
 The UI is inspired by [OpenVPN Connect](https://openvpn.net/client/) — simple, focused, and easy to use. Built with native macOS vibrancy for a modern frosted glass look that blends with your desktop.
 
@@ -30,15 +30,15 @@ The UI is inspired by [OpenVPN Connect](https://openvpn.net/client/) — simple,
 
 ```bash
 brew tap walcew/tap
-brew install --cask openfortivpn-connect
+brew install --cask vpnconnect
 ```
 
 ### Manual
 
-Download the `.dmg` for your architecture from [Releases](https://github.com/walcew/openfortivpn-connect/releases):
+Download the `.dmg` for your architecture from [Releases](https://github.com/walcew/vpnconnect/releases):
 
-- **Apple Silicon (M1/M2/M3/M4):** `OpenFortiVpn.Connect_x.x.x_aarch64.dmg`
-- **Intel:** `OpenFortiVpn.Connect_x.x.x_x64.dmg`
+- **Apple Silicon (M1/M2/M3/M4):** `VPN.Connect_x.x.x_aarch64.dmg`
+- **Intel:** `VPN.Connect_x.x.x_x64.dmg`
 
 ### First run and upgrades
 
