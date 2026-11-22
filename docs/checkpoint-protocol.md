@@ -170,9 +170,17 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 ### Com o túnel de pé
 
 - Dados nos dois sentidos, um pacote IP por quadro.
-- O cliente manda `(keepalive :id (0))` a cada intervalo e quando a sessão pede uma sondagem imediata (troca de rede ou wake). Quadros de controle do gateway que não são `disconnect` são ignorados.
-- `disconnect` do gateway, conexão fechada ou escrita que não termina em três intervalos derrubam o túnel.
+- O cliente manda `(keepalive :id (0))` a cada intervalo de `timeouts:keepalive`, contado da abertura do túnel, e o gateway responde com o mesmo quadro.
+- Cada intervalo sem resposta conta uma falta; a resposta zera a contagem. Na terceira falta seguida o túnel cai com `Tunnel dropped: no response from the gateway` (`cause: tunnel-dropped`): três intervalos depois da última resposta, com dois keepalives sem resposta no meio.
+- Troca de rede ou wake: a sessão move o /32 do gateway para a rota default nova e pede uma sondagem, que é um keepalive fora de hora. Ele não conta falta; se o gateway não responder, as faltas seguem nos ticks normais.
+- Outros quadros de controle do gateway que não são `keepalive` nem `disconnect` são ignorados.
+- `disconnect` do gateway e conexão fechada derrubam o túnel na hora. Uma escrita que não termina em três intervalos (TCP meio aberto) também derruba.
+- Em qualquer queda a sessão desfaz interface, rotas e DNS, sem `Signout`.
 
+### Prazos
+
+- `expires_at` é o início do login mais `timeouts:authentication`; a sessão emite `expiring` 15 minutos antes e encerra com `cause: expired` no horário, como no Fortinet.
+- A sessão confere o relógio de parede a cada 10 s, além de dormir até o prazo: depois de um sleep do Mac, o aviso e a expiração saem no primeiro tick.
 ## Signout
 
 No `disconnect` do usuário, a sessão fecha o túnel, desfaz a rede e manda o pedido `Signout` com o `session_id` da sessão no cabeçalho e `:RequestData ()`, dentro do prazo curto que a sessão já impõe: um gateway mudo não segura a desconexão.

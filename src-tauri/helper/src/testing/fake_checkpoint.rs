@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 
 use super::fake_gateway::PROFILE_ID;
 use super::fake_server::{free_login_port, read_request, CertOptions, TlsServer};
@@ -51,11 +51,22 @@ pub struct CheckpointOptions {
     pub login_options: Option<Vec<(&'static str, &'static str)>>,
     /// As informações do servidor não oferecem o túnel `SSL`.
     pub no_ssl: bool,
+    /// Responde só aos primeiros n keepalives; `Some(0)` nunca responde.
+    pub keepalive_answers: Option<usize>,
+    /// `timeouts:keepalive` do `hello_reply`, em segundos (padrão 20).
+    pub keepalive: Option<u64>,
+    /// `timeouts:authentication` do `hello_reply`, em segundos (padrão `AUTH_TIMEOUT`).
+    pub auth_timeout: Option<u64>,
 }
 
 struct Shared {
     options: CheckpointOptions,
     logouts: AtomicUsize,
+    /// Keepalives recebidos pelo túnel.
+    keepalives: AtomicUsize,
+    close_tunnel: Notify,
+    stop_reading: Notify,
+    send_disconnect: Notify,
     /// Pedidos do canal de controle, na ordem em que chegaram.
     requests: Mutex<Vec<Sexp>>,
     from_client: mpsc::UnboundedSender<Vec<u8>>,
@@ -84,6 +95,10 @@ impl FakeCheckpoint {
         let shared = Arc::new(Shared {
             options,
             logouts: AtomicUsize::new(0),
+            keepalives: AtomicUsize::new(0),
+            close_tunnel: Notify::new(),
+            stop_reading: Notify::new(),
+            send_disconnect: Notify::new(),
             requests: Mutex::new(Vec::new()),
             from_client: from_tx,
             to_client: Mutex::new(Some(to_rx)),
@@ -118,6 +133,25 @@ impl FakeCheckpoint {
 
     pub fn logouts(&self) -> usize {
         self.shared.logouts.load(Ordering::SeqCst)
+    }
+
+    pub fn keepalives(&self) -> usize {
+        self.shared.keepalives.load(Ordering::SeqCst)
+    }
+
+    /// Fecha o túnel do lado do gateway (close_notify do TLS).
+    pub fn close_tunnel(&self) {
+        self.shared.close_tunnel.notify_one();
+    }
+
+    /// Para de ler o túnel e segura a conexão aberta, como um TCP meio aberto.
+    pub fn stop_reading(&self) {
+        self.shared.stop_reading.notify_one();
+    }
+
+    /// Encerra a sessão pelo túnel com um quadro `disconnect`.
+    pub fn send_disconnect(&self) {
+        self.shared.send_disconnect.notify_one();
     }
 
     /// Pedidos do canal de controle recebidos até agora.
@@ -232,7 +266,8 @@ fn server_info(options: &CheckpointOptions) -> String {
 }
 
 fn hello_reply(options: &CheckpointOptions) -> String {
-    let (auth, keepalive) = if options.huge_timeouts { (u64::MAX, u64::MAX) } else { (AUTH_TIMEOUT, 20) };
+    let (auth, keepalive) =
+        if options.huge_timeouts { (u64::MAX, u64::MAX) } else { (options.auth_timeout.unwrap_or(AUTH_TIMEOUT), options.keepalive.unwrap_or(20)) };
     let ranges: String = RANGES.iter().map(|(from, to)| format!("\n\t\t: (\n\t\t\t:from ({})\n\t\t\t:to ({}))", from, to)).collect();
     format!(
         "(hello_reply\n\t:version (1)\n\t:protocol_version (1)\n\
@@ -279,11 +314,16 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
     let _ = wr.write_all(&control(&hello_reply(&shared.options))).await;
 
     let (frames_tx, mut frames) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
+    let reader = shared.clone();
     tokio::spawn(async move {
         loop {
             let mut len = [0u8; 4];
-            if rd.read_exact(&mut len).await.is_err() {
-                return;
+            tokio::select! {
+                r = rd.read_exact(&mut len) => if r.is_err() {
+                    return;
+                },
+                // Segura o stream aberto e nunca mais lê.
+                _ = reader.stop_reading.notified() => std::future::pending::<()>().await,
             }
             let Some(f) = read_frame(&mut rd, u32::from_be_bytes(len)).await else { return };
             if frames_tx.send(f).is_err() {
@@ -299,13 +339,23 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
                 Some((CONTROL, text)) => {
                     let text = sexp::parse(&String::from_utf8_lossy(&text)).expect("control frame is not an S-expression");
                     if text.name() == Some("keepalive") {
-                        let _ = wr.write_all(&control("(keepalive\n\t:id (0))")).await;
+                        let n = shared.keepalives.fetch_add(1, Ordering::SeqCst);
+                        if shared.options.keepalive_answers.is_none_or(|answers| n < answers) {
+                            let _ = wr.write_all(&control("(keepalive\n\t:id (0))")).await;
+                        }
                     }
                 }
                 Some((kind, _)) => panic!("unknown frame type {} from client", kind),
                 None => break,
             },
             Some(p) = to_client.recv() => { let _ = wr.write_all(&frame(DATA, &p)).await; }
+            _ = shared.close_tunnel.notified() => {
+                let _ = wr.shutdown().await;
+                break;
+            }
+            _ = shared.send_disconnect.notified() => {
+                let _ = wr.write_all(&control("(disconnect\n\t:code (28)\n\t:message (\"Session terminated\"))")).await;
+            }
         }
     }
     *shared.to_client.lock().unwrap() = Some(to_client);

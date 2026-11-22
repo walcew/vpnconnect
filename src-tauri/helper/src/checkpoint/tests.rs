@@ -23,13 +23,21 @@ async fn start(gw: &FakeCheckpoint, bandwidth: Option<Duration>) -> (PathBuf, Ar
 
 /// `start` com prazos encurtados; a porta do listener é sempre a do gateway falso.
 async fn start_tuned(gw: &FakeCheckpoint, bandwidth: Option<Duration>, tuning: Tuning) -> (PathBuf, Arc<FakeOs>) {
-    let os = Arc::new(FakeOs::default());
-    let mut session = Session::new(os.clone()).with_tuning(Tuning { login_port: Some(gw.login_port), ..tuning });
-    if let Some(interval) = bandwidth {
-        session = session.with_bandwidth_interval(interval);
-    }
-    let (path, _session) = start_session(allow_all(), session).await;
+    let (path, os, _session) = start_built(gw, tuning, |s| match bandwidth {
+        Some(interval) => s.with_bandwidth_interval(interval),
+        None => s,
+    })
+    .await;
     (path, os)
+}
+
+/// Sessão com `tuning` e a porta do listener do gateway falso; `build` acrescenta o resto (relógio,
+/// conferência do relógio). Devolve também a sessão, para injetar a troca de rede.
+async fn start_built(gw: &FakeCheckpoint, tuning: Tuning, build: impl FnOnce(Session) -> Session) -> (PathBuf, Arc<FakeOs>, Arc<Session>) {
+    let os = Arc::new(FakeOs::default());
+    let session = build(Session::new(os.clone()).with_tuning(Tuning { login_port: Some(gw.login_port), ..tuning }));
+    let (path, session) = start_session(allow_all(), session).await;
+    (path, os, session)
 }
 
 fn connect_cmd(profile: Value) -> Value {
@@ -538,4 +546,195 @@ async fn busy_login_port_disconnects_naming_the_port_and_its_usual_holder() {
     assert!(reason.contains(&format!("port {} is already in use", gw.login_port)) && reason.contains("Check Point Endpoint Security"), "{}", reason);
     assert!(state.get("cause").is_none(), "{}", state);
     assert!(os.calls().is_empty());
+}
+
+// ---- Keepalive, queda, expiração e troca de rede ----
+
+/// Keepalive curto nos testes; a produção usa o intervalo do `hello_reply`.
+const KEEPALIVE: Duration = Duration::from_millis(50);
+
+fn fast() -> Tuning {
+    Tuning { keepalive: Some(KEEPALIVE), ..Default::default() }
+}
+
+/// Conectada pelo IdP numa sessão de `start_built`.
+async fn connected(options: CheckpointOptions, tuning: Tuning, build: impl FnOnce(Session) -> Session) -> (FakeCheckpoint, Client, Arc<FakeOs>, Value, Arc<Session>) {
+    let gw = FakeCheckpoint::start(options).await;
+    let (path, os, session) = start_built(&gw, tuning, build).await;
+    let mut c = client(&path).await;
+    let (state, _) = idp_connect(&mut c, &gw, gw.profile()).await;
+    (gw, c, os, state, session)
+}
+
+/// Queda com esta causa e razão, e nada da rede deixado para trás.
+fn assert_dropped(state: &Value, os: &FakeOs, cause: &str, reason: &str) {
+    assert_eq!(state["state"], "disconnected", "{}", state);
+    assert_eq!(state["cause"], cause, "{}", state);
+    assert!(state["reason"].as_str().unwrap().contains(reason), "{}", state);
+    assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
+    assert_eq!(os.saved_state(), None);
+    assert!(os.calls().contains(&OsCall::Down) && os.calls().contains(&OsCall::RemoveDns), "{:?}", os.calls());
+}
+
+async fn wait_for_keepalives(gw: &FakeCheckpoint, n: usize, within: Duration) {
+    let started = Instant::now();
+    while gw.keepalives() < n {
+        assert!(started.elapsed() < within, "only {} keepalives", gw.keepalives());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Sem `expiring` nem `disconnected` pendentes: a resposta do `status` vem antes de qualquer estado.
+async fn assert_still_connected(c: &mut Client) {
+    c.send(json!({"v": 2, "cmd": "status"})).await;
+    let resp = c.recv_skipping_logs().await;
+    assert_eq!(resp["type"], "response", "{}", resp);
+    assert_eq!(resp["state"], "connected", "{}", resp);
+}
+
+#[tokio::test]
+async fn keepalive_goes_out_at_the_interval_the_gateway_announces() {
+    let _ports = SAML_PORTS.lock().await;
+    let options = CheckpointOptions { keepalive: Some(1), ..Default::default() };
+    let (gw, mut c, _os, _, _session) = connected(options, Tuning::default(), |s| s).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(gw.keepalives(), 0, "keepalive before the announced second");
+    wait_for_keepalives(&gw, 1, Duration::from_secs(2)).await;
+    assert_still_connected(&mut c).await;
+}
+
+#[tokio::test]
+async fn healthy_session_stays_connected_past_three_keepalive_intervals() {
+    let _ports = SAML_PORTS.lock().await;
+    let (gw, mut c, os, _, _session) = connected(CheckpointOptions::default(), fast(), |s| s).await;
+    tokio::time::sleep(KEEPALIVE * 6).await;
+    assert!(gw.keepalives() >= 4, "only {} keepalives", gw.keepalives());
+    assert_still_connected(&mut c).await;
+    assert!(!os.applied().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_that_stops_answering_keepalive_drops_three_intervals_after_its_last_answer() {
+    let _ports = SAML_PORTS.lock().await;
+    let options = CheckpointOptions { keepalive_answers: Some(2), ..Default::default() };
+    let (gw, mut c, os, _, _session) = connected(options, fast(), |s| s).await;
+    let started = Instant::now();
+    let state = c.recv_skipping_logs().await;
+    assert_dropped(&state, &os, "tunnel-dropped", "Tunnel dropped: no response from the gateway");
+    // Respostas nos ticks 1 e 2, keepalives sem resposta nos ticks 3 e 4, queda no 5. Os ticks
+    // contam da abertura do túnel, antes do `connected` que `started` marca.
+    assert_eq!(gw.keepalives(), 4);
+    assert!(started.elapsed() >= KEEPALIVE * 4 && started.elapsed() < KEEPALIVE * 12, "took {:?}", started.elapsed());
+    assert_eq!(gw.logouts(), 0);
+}
+
+#[tokio::test]
+async fn gateway_closing_the_tunnel_tears_down_at_once() {
+    let _ports = SAML_PORTS.lock().await;
+    // Keepalive no intervalo de produção (20 s): só o TLS fechado explica a queda dentro do prazo do recv.
+    let (gw, mut c, os, _, _session) = connected(CheckpointOptions::default(), Tuning::default(), |s| s).await;
+    gw.close_tunnel();
+    let state = c.recv_skipping_logs().await;
+    assert_dropped(&state, &os, "tunnel-dropped", "Tunnel dropped: connection closed by the gateway");
+    assert_eq!(gw.logouts(), 0);
+}
+
+#[tokio::test]
+async fn gateway_disconnect_frame_tears_down_at_once() {
+    let _ports = SAML_PORTS.lock().await;
+    let (gw, mut c, os, _, _session) = connected(CheckpointOptions::default(), Tuning::default(), |s| s).await;
+    gw.send_disconnect();
+    let state = c.recv_skipping_logs().await;
+    assert_dropped(&state, &os, "tunnel-dropped", "the gateway ended the session (code 28: Session terminated)");
+    assert_eq!(gw.logouts(), 0);
+}
+
+#[tokio::test]
+async fn write_stuck_on_a_half_open_tunnel_is_a_dropped_tunnel() {
+    let _ports = SAML_PORTS.lock().await;
+    let (gw, mut c, os, _, _session) = connected(CheckpointOptions::default(), fast(), |s| s).await;
+    let iface = os.take_packets();
+    gw.stop_reading();
+    // Tráfego até o buffer de envio encher e a escrita travar; para quando a sessão cair.
+    tokio::spawn(async move { while iface.tx.send(vec![0x45; 1300]).await.is_ok() {} });
+    let state = c.recv_skipping_logs().await;
+    assert_dropped(&state, &os, "tunnel-dropped", "Tunnel dropped: write timed out");
+}
+
+#[tokio::test]
+async fn short_auth_timeout_warns_and_then_expires_the_session() {
+    let _ports = SAML_PORTS.lock().await;
+    let options = CheckpointOptions { auth_timeout: Some(2), ..Default::default() };
+    let (gw, mut c, os, connected, _session) = connected(options, Tuning::default(), |s| s).await;
+    // Faltando menos que a antecedência do aviso, ele sai logo depois do connected.
+    let warning = c.recv_skipping_logs().await;
+    assert_eq!(warning["event"], "expiring", "{}", warning);
+    assert_eq!(warning["expires_at"], connected["expires_at"]);
+    assert!(!os.applied().is_empty(), "torn down before the expiry");
+    let state = c.recv_skipping_logs().await;
+    assert_dropped(&state, &os, "expired", "Session expired");
+    assert_eq!(gw.logouts(), 0);
+}
+
+/// Relógio de parede adiantável: `skew` segundos à frente do real.
+type Skew = Arc<std::sync::atomic::AtomicI64>;
+
+fn skewed(session: Session, skew: &Skew) -> Session {
+    let s = skew.clone();
+    session.with_clock(Arc::new(move || chrono::Utc::now() + chrono::Duration::seconds(s.load(std::sync::atomic::Ordering::SeqCst))))
+}
+
+#[tokio::test]
+async fn wall_clock_jump_after_sleep_warns_and_expires_on_the_next_keepalive_tick() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _ports = SAML_PORTS.lock().await;
+    let skew = Skew::default();
+    let build = |s: Session| skewed(s, &skew).with_clock_check(KEEPALIVE);
+    let (gw, mut c, os, connected, _session) = connected(CheckpointOptions::default(), fast(), build).await;
+
+    // Mac dormiu até 10 min antes da expiração: o relógio monotônico não andou.
+    skew.store(AUTH_TIMEOUT as i64 - 600, SeqCst);
+    let warning = c.recv_skipping_logs().await;
+    assert_eq!(warning["event"], "expiring", "{}", warning);
+    assert_eq!(warning["expires_at"], connected["expires_at"]);
+
+    skew.store(AUTH_TIMEOUT as i64 + 1, SeqCst);
+    let state = c.recv_skipping_logs().await;
+    assert_dropped(&state, &os, "expired", "Session expired");
+    assert_eq!(gw.logouts(), 0);
+}
+
+#[tokio::test]
+async fn auth_timeout_counts_from_the_start_of_the_login() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let _ports = SAML_PORTS.lock().await;
+    let skew = Skew::default();
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (path, _os, _session) = start_built(&gw, Tuning::default(), |s| skewed(s, &skew)).await;
+    let mut c = client(&path).await;
+    assert_eq!(next_state_after_connect(&mut c, gw.profile()).await["state"], "waiting-saml");
+    // O login no navegador demorou 10 min.
+    skew.store(600, SeqCst);
+    assert!(browser(gw.login_port, &format!("GET /{}", IDP_CODE)).await.starts_with("HTTP/1.1 200 OK"));
+    let state = next_state(&mut c).await;
+    assert_eq!(state["state"], "connected", "{}", state);
+    let since = chrono::DateTime::parse_from_rfc3339(state["since"].as_str().unwrap()).unwrap();
+    let expires = chrono::DateTime::parse_from_rfc3339(state["expires_at"].as_str().unwrap()).unwrap();
+    let ttl = (expires - since).num_seconds();
+    assert!(ttl == AUTH_TIMEOUT as i64 - 600 || ttl == AUTH_TIMEOUT as i64 - 601, "{}", ttl);
+}
+
+#[tokio::test]
+async fn network_change_moves_the_gateway_route_and_sends_a_keepalive_at_once() {
+    use crate::testing::fake_os::NEW_VIA;
+    let _ports = SAML_PORTS.lock().await;
+    // Keepalive no intervalo de produção (20 s): o keepalive que chega é o da troca de rede.
+    let (gw, mut c, os, _, session) = connected(CheckpointOptions::default(), Tuning::default(), |s| s).await;
+    let before = os.calls().len();
+    session.network_changed();
+    wait_for_keepalives(&gw, 1, Duration::from_secs(3)).await;
+    // O /32 é levado ao default novo sem sair da tabela.
+    assert_eq!(os.calls()[before..], [OsCall::MoveGatewayRoute(IpAddr::V4(Ipv4Addr::LOCALHOST))]);
+    assert_eq!(os.saved_state().unwrap()["gateway_via"], NEW_VIA.to_string());
+    assert_still_connected(&mut c).await;
 }

@@ -17,6 +17,8 @@ const DATA: u32 = 2;
 const HEADER_LEN: usize = 8;
 /// Teto de um quadro, para um tamanho absurdo do gateway não virar alocação sem limite.
 const MAX_FRAME: usize = 1 << 20;
+/// Intervalos seguidos sem resposta ao keepalive que derrubam o túnel.
+const KEEPALIVE_MISSES: u32 = 3;
 
 pub enum Frame {
     Control(Sexp),
@@ -82,8 +84,8 @@ fn keepalive() -> Vec<u8> {
 }
 
 /// Conduz o túnel até ele cair e devolve o motivo. Pacotes IP fluem entre o stream e o canal da
-/// interface, e um `keepalive` sai a cada `interval` e a cada `probe`.
-// shortcut: o keepalive só sai, sem contar respostas, derrubar o túnel com gateway mudo no #51.
+/// interface, e um `keepalive` sai a cada `interval` e a cada `probe`. Três intervalos seguidos
+/// sem resposta ao keepalive derrubam o túnel.
 pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     mut buf: Vec<u8>,
@@ -92,7 +94,8 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     to_iface: mpsc::Sender<Vec<u8>>,
     mut from_iface: mpsc::Receiver<Vec<u8>>,
 ) -> String {
-    let deadline = interval * 3;
+    let deadline = interval * KEEPALIVE_MISSES;
+    let mut missed = 0;
     let mut chunk = vec![0u8; 65536];
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + interval, interval);
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -106,6 +109,7 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
                 Ok(Some(Frame::Control(s))) if s.name() == Some("disconnect") => {
                     return format!("Tunnel dropped: the gateway ended the session ({})", disconnect_reason(&s));
                 }
+                Ok(Some(Frame::Control(s))) if s.name() == Some("keepalive") => missed = 0,
                 Ok(Some(Frame::Control(_))) => {}
                 Ok(None) => break,
                 Err(e) => return e,
@@ -122,7 +126,14 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
                 Err(e) => return format!("Tunnel dropped: read failed: {}", e),
             },
             Some(packet) = from_iface.recv() => raw(DATA, &packet),
-            _ = tick.tick() => keepalive(),
+            _ = tick.tick() => {
+                // Com a última resposta logo depois de um tick, a queda sai ~3 intervalos depois dela.
+                missed += 1;
+                if missed == KEEPALIVE_MISSES {
+                    return "Tunnel dropped: no response from the gateway".into();
+                }
+                keepalive()
+            }
             _ = probe.notified() => keepalive(),
         };
         if let Err(e) = write(&mut stream, &out, deadline).await {
