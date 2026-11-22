@@ -5,10 +5,10 @@ use std::io::{IsTerminal, Read};
 
 use serde_json::{json, Value};
 
-use super::args::{Auth, Fields, ProfileCmd};
+use super::args::{self, Auth, Fields, ProfileCmd};
 use super::{output, target, CliError, Out};
 use crate::keychain;
-use crate::models::{AuthType, VpnProfile};
+use crate::models::{AuthType, Engine, VpnProfile};
 use crate::vpn_manager::VpnManager;
 
 pub fn run(out: &Out, cmd: ProfileCmd) -> Result<(), CliError> {
@@ -19,8 +19,16 @@ pub fn run(out: &Out, cmd: ProfileCmd) -> Result<(), CliError> {
             out.emit(&Value::Array(views.clone()), || print_table(&views));
         }
         ProfileCmd::Show { profile } => print(out, &target::resolve(&profile)?)?,
-        ProfileCmd::Add { name, host, fields } => {
-            let mut p = VpnProfile::default();
+        ProfileCmd::Add { name, host, engine, fields } => {
+            let engine = match engine {
+                args::Engine::Fortinet => Engine::Fortinet,
+                args::Engine::Checkpoint => Engine::Checkpoint,
+            };
+            // Check Point entra sempre por SAML, na porta padrão dele.
+            let mut p = VpnProfile { engine, port: engine.default_port(), ..VpnProfile::default() };
+            if engine == Engine::Checkpoint {
+                p.auth_type = AuthType::Saml;
+            }
             apply(&mut p, Some(name), Some(host), &fields)?;
             ensure_name_free(&mgr, &p)?;
             save(out, &mgr, p)?;
@@ -42,6 +50,9 @@ pub fn run(out: &Out, cmd: ProfileCmd) -> Result<(), CliError> {
         }
         ProfileCmd::SetPassword { profile, .. } => {
             let p = target::resolve(&profile)?;
+            if p.engine == Engine::Checkpoint {
+                return Err(CliError::failure("INVALID_ARGUMENT", "A Check Point Profile has no password: it signs in through the identity provider"));
+            }
             keychain::set_password(&p.id, &read_password()?).map_err(CliError::cli)?;
             print(out, &p)?;
         }
@@ -72,6 +83,23 @@ fn apply(p: &mut VpnProfile, name: Option<String>, host: Option<String>, f: &Fie
         "" => Err(CliError::failure("INVALID_ARGUMENT", format!("--{flag} cannot be empty"))),
         v => Ok(v.to_string()),
     };
+    if p.engine == Engine::Checkpoint {
+        let refused = if f.username.is_some() {
+            Some("--username")
+        } else if f.otp_required {
+            Some("--otp-required")
+        } else if matches!(f.auth, Some(Auth::Password)) {
+            Some("--auth password")
+        } else {
+            None
+        };
+        if let Some(flag) = refused {
+            return Err(CliError::failure(
+                "INVALID_ARGUMENT",
+                format!("{flag} does not apply to a Check Point Profile: it signs in through the identity provider, in the browser"),
+            ));
+        }
+    }
     if let Some(name) = name {
         p.name = required("name", name)?;
     }
@@ -159,7 +187,7 @@ fn read_password() -> Result<String, CliError> {
 fn view(p: &VpnProfile) -> Result<Value, CliError> {
     let has_password = keychain::get_password(&p.id).map_err(CliError::cli)?.is_some_and(|s| !s.is_empty());
     Ok(json!({
-        "id": p.id, "name": p.name, "host": p.host, "port": p.port,
+        "id": p.id, "name": p.name, "engine": p.engine, "host": p.host, "port": p.port,
         "auth": if p.auth_type == AuthType::Saml { "saml" } else { "password" },
         "username": p.username, "realm": p.realm, "otp_required": p.otp_required,
         "auto_trust": p.ignore_cert_errors, "trusted_certs": p.trusted_certs,
@@ -170,7 +198,7 @@ fn view(p: &VpnProfile) -> Result<Value, CliError> {
 fn print(out: &Out, p: &VpnProfile) -> Result<(), CliError> {
     let v = view(p)?;
     out.emit(&v, || {
-        for key in ["id", "name", "host", "port", "auth", "username", "realm", "otp_required", "auto_trust", "trusted_certs", "dns_domains", "has_password"] {
+        for key in ["id", "name", "engine", "host", "port", "auth", "username", "realm", "otp_required", "auto_trust", "trusted_certs", "dns_domains", "has_password"] {
             if let Some(text) = output::text(&v[key]) {
                 println!("{:<14} {text}", format!("{key}:"));
             }
@@ -181,9 +209,9 @@ fn print(out: &Out, p: &VpnProfile) -> Result<(), CliError> {
 
 fn print_table(views: &[Value]) {
     let width = views.iter().map(|v| v["name"].as_str().unwrap_or_default().len()).max().unwrap_or(0).max(4);
-    println!("{:<36}  {:<width$}  {:<8}  HOST", "ID", "NAME", "AUTH");
+    println!("{:<36}  {:<width$}  {:<10}  {:<8}  HOST", "ID", "NAME", "ENGINE", "AUTH");
     for v in views {
         let field = |k: &str| v[k].as_str().unwrap_or_default().to_string();
-        println!("{:<36}  {:<width$}  {:<8}  {}:{}", field("id"), field("name"), field("auth"), field("host"), v["port"]);
+        println!("{:<36}  {:<width$}  {:<10}  {:<8}  {}:{}", field("id"), field("name"), field("engine"), field("auth"), field("host"), v["port"]);
     }
 }

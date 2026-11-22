@@ -121,6 +121,7 @@ pub fn connect_request(profile: &VpnProfile, creds: &Credentials, otp: Option<&s
         "cmd": "connect",
         "profile": {
             "id": profile.id,
+            "engine": profile.engine,
             "host": profile.host,
             "port": profile.port,
             "auth": match creds {
@@ -397,7 +398,7 @@ mod tests {
             json!({
                 "v": 2, "cmd": "connect",
                 "profile": {
-                    "id": "p1", "host": "vpn.example.com", "port": 443, "auth": "password",
+                    "id": "p1", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth": "password",
                     "username": "alice", "trusted_certs": ["abc"], "ignore_cert_errors": false,
                     "dns_match_domains": ["corp.example.com"], "dns_fallback_servers": ["192.168.0.1"],
                     "realm": null
@@ -433,6 +434,15 @@ mod tests {
         let digest = "ab".repeat(32);
         assert!(matches!(parse_frame(&frame(&digest)), Some(Incoming::State { cert_digest: Some(d), .. }) if d == digest));
         assert!(matches!(parse_frame(&frame("not a digest")), Some(Incoming::State { cert_digest: None, .. })));
+    }
+
+    #[test]
+    fn connect_sends_the_engine_of_a_checkpoint_profile() {
+        let (path, rx) = fake_helper(vec![], |_| vec![ok()]);
+        let profile = VpnProfile { engine: Engine::Checkpoint, auth_type: AuthType::Saml, username: None, ..password_profile() };
+        connect(&path, &profile, &Credentials::Saml, None, &[]).unwrap();
+        let req = rx.recv().unwrap();
+        assert_eq!((req["profile"]["engine"].clone(), req["profile"]["auth"].clone()), (json!("checkpoint"), json!("saml")));
     }
 
     #[test]
@@ -544,7 +554,7 @@ mod tests {
             json!({
                 "v": 2, "cmd": "connect",
                 "profile": {
-                    "id": "p1", "host": "vpn.example.com", "port": 443, "auth": "saml",
+                    "id": "p1", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth": "saml",
                     "trusted_certs": ["abc"], "ignore_cert_errors": false,
                     "dns_match_domains": ["corp.example.com"], "dns_fallback_servers": [], "realm": null
                 },

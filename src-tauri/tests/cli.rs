@@ -365,6 +365,73 @@ fn connect_saml_with_no_browser_only_prints_the_url() {
     assert!(home.opened_urls().is_empty(), "{:?}", home.opened_urls());
 }
 
+/// Um Profile Check Point como a CLI o grava: SAML, sem usuário.
+fn checkpoint_profile(id: &str, name: &str) -> Value {
+    let mut p = saml_profile(id, name);
+    p["engine"] = json!("checkpoint");
+    p
+}
+
+fn checkpoint_helper(home: &Home) -> FakeHelper {
+    FakeHelper::idle(&home.socket(), vec![state(json!({"state": "waiting-saml", "profile_id": "p4", "url": SAML_URL})), connected_event()])
+}
+
+#[test]
+fn connect_sends_the_engine_of_a_fortinet_profile() {
+    let home = home_with_corp(&[]);
+    let helper = FakeHelper::idle(&home.socket(), vec![connected_event()]);
+    assert_eq!(home.run(&["connect", "Corp"]).status.code(), Some(0));
+    assert_eq!(connect_request(&helper)["profile"]["engine"], "fortinet");
+}
+
+#[test]
+fn connect_a_checkpoint_profile_sends_the_engine_without_password_or_otp() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let helper = checkpoint_helper(&home);
+
+    let out = home.run(&["connect", "Cp", "--json"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let connect = connect_request(&helper);
+    assert_eq!(connect["profile"]["engine"], "checkpoint");
+    assert_eq!(connect["profile"]["auth"], "saml");
+    assert_eq!(connect["otp"], Value::Null);
+    assert!(connect.get("password").is_none(), "{connect}");
+    assert!(connect["profile"].get("username").is_none(), "{connect}");
+}
+
+#[test]
+fn connect_a_checkpoint_profile_opens_the_waiting_saml_url_and_prints_it() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let _helper = checkpoint_helper(&home);
+
+    let out = home.run(&["connect", "Cp"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(SAML_URL), "{}", text(&out.stderr));
+    assert_eq!(home.opened_urls(), [SAML_URL]);
+}
+
+#[test]
+fn connect_a_checkpoint_profile_with_no_browser_only_prints_the_url() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let _helper = checkpoint_helper(&home);
+
+    let out = home.run(&["connect", "Cp", "--no-browser"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(text(&out.stderr).contains(SAML_URL), "{}", text(&out.stderr));
+    assert!(home.opened_urls().is_empty(), "{:?}", home.opened_urls());
+}
+
+#[test]
+fn connect_otp_on_a_checkpoint_profile_is_refused_before_talking_to_the_helper() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let helper = checkpoint_helper(&home);
+    assert_refused(&home.run(&["connect", "Cp", "--otp", "123456", "--json"]), 255, "INVALID_ARGUMENT");
+    assert!(helper.requests().is_empty(), "{:?}", helper.requests());
+}
+
 #[test]
 fn connect_with_an_untrusted_certificate_fails_with_the_digest() {
     let home = home_with_corp(&[]);
@@ -773,7 +840,7 @@ fn assert_refused(out: &Output, exit: i32, code: &str) {
 
 /// O Profile `p1` completo, como a GUI o grava, para conferir o que a CLI preserva.
 fn full_profile() -> Value {
-    json!({"id": "p1", "name": "Corp", "host": "vpn.example.com", "port": 443, "auth_type": "Password",
+    json!({"id": "p1", "name": "Corp", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth_type": "Password",
            "username": "alice", "otp_required": true, "realm": "corp", "trusted_certs": [DIGEST],
            "ignore_cert_errors": true, "dns_match_domains": ["corp.example.com"], "extra_args": ["--set-dns=0"]})
 }
@@ -813,7 +880,7 @@ fn profile_show_prints_every_field_but_never_the_password_or_extra_args() {
 
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
     assert_eq!(json_out(&out), json!({
-        "id": "p1", "name": "Corp", "host": "vpn.example.com", "port": 443, "auth": "password",
+        "id": "p1", "name": "Corp", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth": "password",
         "username": "alice", "realm": "corp", "otp_required": true, "auto_trust": true,
         "trusted_certs": [DIGEST], "dns_domains": ["corp.example.com"], "has_password": true,
     }));
@@ -852,7 +919,7 @@ fn profile_add_creates_the_profile_the_gui_would() {
     assert_eq!(shown["id"], id);
     assert_eq!(shown["has_password"], false);
     assert_eq!(stored[0], json!({
-        "id": id, "name": "Corp", "host": "vpn.example.com", "port": 443, "auth_type": "Password",
+        "id": id, "name": "Corp", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth_type": "Password",
         "username": "alice", "otp_required": true, "realm": "corp", "trusted_certs": [],
         "ignore_cert_errors": true, "dns_match_domains": ["corp.example.com", "intra.local"], "extra_args": [],
     }));
@@ -955,6 +1022,119 @@ fn profile_edit_to_saml_drops_the_otp_requirement() {
     home.run(&["profile", "edit", "Corp", "--auth", "saml"]);
     let p = &home.stored_profiles()[0];
     assert_eq!((p["auth_type"].clone(), p["otp_required"].clone()), (json!("Saml"), json!(false)));
+}
+
+#[test]
+fn a_profiles_file_without_engine_loads_as_fortinet_and_is_not_rewritten() {
+    let home = home_with_corp(&[]);
+    let path = home.0.join("profiles.json");
+    let before = std::fs::read(&path).unwrap();
+    let _helper = FakeHelper::idle(&home.socket(), vec![connected_event()]);
+
+    let list = json_out(&home.run(&["profile", "ls", "--json"]));
+    assert_eq!(list[0]["engine"], "fortinet");
+    assert_eq!(json_out(&home.run(&["profile", "show", "Corp", "--json"]))["engine"], "fortinet");
+    assert_eq!(home.run(&["connect", "Corp"]).status.code(), Some(0));
+
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn profile_ls_and_show_print_the_engine_as_text() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let table = text(&home.run(&["profile", "ls"]).stdout);
+    assert!(table.lines().next().unwrap().contains("ENGINE"), "{table}");
+    assert!(table.contains("fortinet") && table.contains("checkpoint"), "{table}");
+    assert!(text(&home.run(&["profile", "show", "Cp"]).stdout).contains("checkpoint"));
+}
+
+#[test]
+fn profile_add_checkpoint_is_saml_on_port_443_without_credentials() {
+    let home = Home::new();
+
+    let out = home.run(&["profile", "add", "--engine", "checkpoint", "--name", "Cp", "--host", "gw.example.com", "--json"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = json_out(&out);
+    assert_eq!((shown["engine"].clone(), shown["auth"].clone(), shown["port"].clone()), (json!("checkpoint"), json!("saml"), json!(443)));
+    let p = &home.stored_profiles()[0];
+    assert_eq!(
+        (p["engine"].clone(), p["auth_type"].clone(), p["port"].clone(), p["username"].clone(), p["otp_required"].clone()),
+        (json!("checkpoint"), json!("Saml"), json!(443), Value::Null, json!(false))
+    );
+}
+
+#[test]
+fn profile_add_checkpoint_keeps_the_login_option_port_and_saml() {
+    let home = Home::new();
+    let out = home.run(&["profile", "add", "--engine", "checkpoint", "--name", "Cp", "--host", "h", "--port", "4433", "--realm", "idp", "--auth", "saml"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let p = &home.stored_profiles()[0];
+    assert_eq!((p["port"].clone(), p["realm"].clone()), (json!(4433), json!("idp")));
+}
+
+#[test]
+fn profile_add_defaults_to_the_fortinet_engine() {
+    let home = Home::new();
+    let out = home.run(&["profile", "add", "--name", "Plain", "--host", "h", "--json"]);
+    assert_eq!(json_out(&out)["engine"], "fortinet");
+    assert_eq!(home.stored_profiles()[0]["engine"], "fortinet");
+    assert_refused(&home.run(&["profile", "add", "--engine", "wireguard", "--name", "x", "--host", "h", "--json"]), 255, "INVALID_ARGUMENT");
+}
+
+#[test]
+fn profile_add_checkpoint_refuses_username_otp_and_password_auth() {
+    let home = Home::new();
+    for flags in [&["--username", "alice"][..], &["--otp-required"], &["--auth", "password"]] {
+        let mut args = vec!["profile", "add", "--engine", "checkpoint", "--name", "Cp", "--host", "h", "--json"];
+        args.extend_from_slice(flags);
+        assert_refused(&home.run(&args), 255, "INVALID_ARGUMENT");
+    }
+    assert_eq!(home.stored_profiles(), json!([]));
+}
+
+#[test]
+fn profile_edit_a_checkpoint_profile_refuses_username_otp_and_password_auth() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let before = home.stored_profiles();
+    for flags in [&["--username", "alice"][..], &["--otp-required"], &["--auth", "password"]] {
+        let mut args = vec!["profile", "edit", "Cp", "--json"];
+        args.extend_from_slice(flags);
+        assert_refused(&home.run(&args), 255, "INVALID_ARGUMENT");
+    }
+    assert_eq!(home.stored_profiles(), before);
+}
+
+#[test]
+fn profile_edit_a_checkpoint_profile_changes_the_login_option_and_keeps_the_engine() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let out = home.run(&["profile", "edit", "Cp", "--realm", "idp", "--port", "4433", "--auth", "saml", "--no-otp-required", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(json_out(&out)["engine"], "checkpoint");
+    let p = &home.stored_profiles()[1];
+    assert_eq!((p["engine"].clone(), p["realm"].clone(), p["port"].clone()), (json!("checkpoint"), json!("idp"), json!(4433)));
+}
+
+#[test]
+fn profile_edit_does_not_accept_engine() {
+    let home = home_with_corp(&[]);
+    assert_refused(&home.run(&["profile", "edit", "Corp", "--engine", "checkpoint", "--json"]), 255, "INVALID_ARGUMENT");
+}
+
+#[test]
+fn set_password_on_a_checkpoint_profile_is_refused() {
+    let home = home_with_corp(&[checkpoint_profile("p4", "Cp")]);
+    let out = home.run_with_stdin(&["profile", "set-password", "Cp", "--password-stdin", "--json"], "pw\n");
+    assert_refused(&out, 255, "INVALID_ARGUMENT");
+    assert_eq!(home.stored_password("p4"), None);
+}
+
+#[test]
+fn profile_add_help_explains_the_engine_and_the_checkpoint_rules() {
+    let help = text(&Home::new().run(&["profile", "add", "--help"]).stdout);
+    for expected in ["--engine", "checkpoint", "443", "identity provider"] {
+        assert!(help.contains(expected), "missing {expected} in:\n{help}");
+    }
 }
 
 #[test]

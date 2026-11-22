@@ -1,6 +1,6 @@
 import { useState } from "react";
-import type { VpnProfile } from "../types";
-import { newProfile } from "../types";
+import type { Engine, VpnProfile } from "../types";
+import { defaultPort, newProfile } from "../types";
 import { TrustedCertManager } from "./TrustedCertManager";
 import { DeleteConfirmModal } from "./DeleteConfirmModal";
 
@@ -22,6 +22,24 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
+  const isCheckpoint = form.engine === "checkpoint";
+
+  // O Engine só muda na criação. A porta acompanha o padrão do Engine enquanto o usuário não a mexeu;
+  // o Check Point entra sempre pelo IdP, então não leva usuário, senha nem OTP.
+  const changeEngine = (engine: Engine) => {
+    const patch: Partial<VpnProfile> =
+      engine === "checkpoint"
+        ? { auth_type: "Saml", username: null, otp_required: false }
+        : { auth_type: "Password" };
+    setForm({
+      ...form,
+      ...patch,
+      engine,
+      port: form.port === defaultPort(form.engine) ? defaultPort(engine) : form.port,
+    });
+    setPassword("");
+  };
+
   const handleSave = async () => {
     if (!form.name.trim() || !form.host.trim()) {
       setError("Name and Host are required");
@@ -30,7 +48,7 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
     setSaving(true);
     setError(null);
     try {
-      await onSave(form, password || undefined);
+      await onSave(form, !isCheckpoint && password ? password : undefined);
     } catch (e) {
       setError(String(e));
       setSaving(false);
@@ -69,6 +87,30 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
       )}
 
       <div className="flex flex-col gap-2.5 max-h-72 overflow-y-auto pr-1">
+        <div className="flex flex-col gap-1">
+          <span className="text-xs text-white/40">Engine</span>
+          <div className="flex gap-4">
+            {(["fortinet", "checkpoint"] as const).map((engine) => (
+              <label
+                key={engine}
+                className={`flex items-center gap-1.5 ${isNew ? "cursor-pointer" : "opacity-60"}`}
+              >
+                <input
+                  type="radio"
+                  name="engine"
+                  checked={form.engine === engine}
+                  disabled={!isNew}
+                  onChange={() => changeEngine(engine)}
+                  className="accent-blue-500"
+                />
+                <span className="text-sm text-white/70">
+                  {engine === "fortinet" ? "Fortinet" : "Check Point"}
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+
         <label className="flex flex-col gap-1">
           <span className="text-xs text-white/40">Name</span>
           <input
@@ -95,11 +137,18 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
               type="number"
               className={inputClass}
               value={form.port}
-              onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || 8443 })}
+              onChange={(e) => setForm({ ...form, port: parseInt(e.target.value) || defaultPort(form.engine) })}
             />
           </label>
         </div>
 
+        {isCheckpoint && (
+          <span className="text-xs text-white/40">
+            Signs in through your identity provider, in the browser.
+          </span>
+        )}
+
+        {!isCheckpoint && (
         <div className="flex flex-col gap-1">
           <span className="text-xs text-white/40">Authentication</span>
           <div className="flex gap-4">
@@ -125,8 +174,9 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
             </label>
           </div>
         </div>
+        )}
 
-        {form.auth_type === "Password" && (
+        {!isCheckpoint && form.auth_type === "Password" && (
           <>
             <label className="flex flex-col gap-1">
               <span className="text-xs text-white/40">Username</span>
@@ -160,13 +210,20 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
         )}
 
         <label className="flex flex-col gap-1">
-          <span className="text-xs text-white/40">Realm (optional)</span>
+          <span className="text-xs text-white/40">
+            {isCheckpoint ? "Login option (optional)" : "Realm (optional)"}
+          </span>
           <input
             className={inputClass}
             value={form.realm ?? ""}
             onChange={(e) => setForm({ ...form, realm: e.target.value || null })}
             placeholder="optional"
           />
+          {isCheckpoint && (
+            <span className="text-xs text-white/40">
+              Leave empty when the gateway offers a single option.
+            </span>
+          )}
         </label>
 
         <label className="flex flex-col gap-1">

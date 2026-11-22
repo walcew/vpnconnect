@@ -236,8 +236,11 @@ fn resolve_password_creds(profile: &VpnProfile) -> Result<(String, String), Stri
     Ok((username.to_string(), password))
 }
 
-/// As credenciais do `connect`: usuário e senha do Keychain, ou nenhuma no SAML.
+/// As credenciais do `connect`: usuário e senha do Keychain, ou nenhuma no SAML e no Check Point.
 pub(crate) fn resolve_credentials(profile: &VpnProfile) -> Result<Credentials, String> {
+    if profile.engine == Engine::Checkpoint {
+        return Ok(Credentials::Saml);
+    }
     match profile.auth_type {
         AuthType::Password => resolve_password_creds(profile).map(|(username, password)| Credentials::Password { username, password }),
         AuthType::Saml => Ok(Credentials::Saml),
@@ -330,6 +333,13 @@ mod tests {
         profile.extra_args = vec!["--foo".to_string()];
         let notice = extra_args_notice(&profile).unwrap();
         assert!(notice.contains("extra_args") && notice.contains("Corp"), "{}", notice);
+    }
+
+    #[test]
+    fn test_checkpoint_profile_never_resolves_a_password() {
+        // Mesmo que o arquivo traga auth Password, o Check Point entra pelo IdP.
+        let profile = VpnProfile { engine: Engine::Checkpoint, ..password_profile(Some("john")) };
+        assert!(matches!(resolve_credentials(&profile), Ok(Credentials::Saml)));
     }
 
     #[test]

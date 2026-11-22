@@ -13,8 +13,12 @@ O daemon privilegiado que roda como root. É o dono da sessão: hospeda o Engine
 _Avoid_: Daemon, service, agent
 
 **Engine**:
-A implementação de um protocolo de VPN dentro do Helper: faz o login e o túnel e entrega a configuração à camada de rede. Hoje só existe o Fortinet SSL VPN.
+A implementação de um protocolo de VPN dentro do Helper: faz o login e o túnel e entrega a configuração à camada de rede. Existem dois: o Fortinet SSL VPN e o Check Point (túnel SSL, com o login pelo IdP). O Profile escolhe o seu na criação (`engine`).
 _Avoid_: Motor externo, backend, driver
+
+**Login option**:
+O id da opção de login do gateway Check Point, a que leva ao IdP. Fica no campo `realm` do Profile e é opcional: vazio, vale a única opção do gateway.
+_Avoid_: Realm (no Check Point), login method
 
 **Auto-trust**:
 Opção do Profile que aceita qualquer certificado do gateway, só do host daquele Profile, registrando no log as trocas de digest entre conexões. No código, `ignore_cert_errors`.

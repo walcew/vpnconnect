@@ -13,10 +13,32 @@ impl Default for AuthType {
     }
 }
 
+/// O protocolo de VPN do Profile (o Engine do Helper). Fixo depois da criação.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Engine {
+    /// Também o valor de um Profile gravado antes do campo existir.
+    #[default]
+    Fortinet,
+    Checkpoint,
+}
+
+impl Engine {
+    pub fn default_port(self) -> u16 {
+        match self {
+            Engine::Fortinet => 8443,
+            Engine::Checkpoint => 443,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VpnProfile {
     pub id: String,
     pub name: String,
+    /// Sem o campo no arquivo, vale `fortinet`; o arquivo não é migrado.
+    #[serde(default)]
+    pub engine: Engine,
     pub host: String,
     pub port: u16,
     pub auth_type: AuthType,
@@ -41,8 +63,9 @@ impl Default for VpnProfile {
         Self {
             id: String::new(),
             name: String::new(),
+            engine: Engine::default(),
             host: String::new(),
-            port: 8443,
+            port: Engine::default().default_port(),
             auth_type: AuthType::default(),
             username: None,
             otp_required: false,
@@ -56,9 +79,9 @@ impl Default for VpnProfile {
 }
 
 impl VpnProfile {
-    /// Profile com senha que exige OTP a cada conexão.
+    /// Profile Fortinet com senha que exige OTP a cada conexão; o Check Point entra só pelo IdP.
     pub fn needs_otp(&self) -> bool {
-        self.auth_type == AuthType::Password && self.otp_required
+        self.engine == Engine::Fortinet && self.auth_type == AuthType::Password && self.otp_required
     }
 
     /// O OTP que vale para este Profile: sem espaços nas pontas, e só se ele exigir OTP
@@ -212,6 +235,8 @@ mod tests {
         assert!(!profile(AuthType::Password, false).needs_otp());
         assert!(!profile(AuthType::Saml, true).needs_otp());
         assert!(!profile(AuthType::Saml, false).needs_otp());
+        let checkpoint = VpnProfile { engine: Engine::Checkpoint, ..profile(AuthType::Password, true) };
+        assert!(!checkpoint.needs_otp());
     }
 
     #[test]

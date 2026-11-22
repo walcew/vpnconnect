@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use super::{status, target, CliError, Out};
 use crate::helper_client::{self, Cause, Channel, HelperError};
+use crate::models::Engine;
 use crate::settings_store::SettingsStore;
 use crate::{helper_installer, paths, vpn_manager};
 
@@ -15,6 +16,9 @@ const INSTALL_HINT: &str = "run `vpnconnect helper install`";
 
 pub fn run(out: &Out, target: &str, otp: Option<&str>, timeout: u64, no_browser: bool) -> Result<(), CliError> {
     let profile = target::resolve(target)?;
+    if otp.is_some() && profile.engine == Engine::Checkpoint {
+        return Err(CliError::failure("INVALID_ARGUMENT", "--otp does not apply to a Check Point Profile: it signs in through the identity provider"));
+    }
     vpn_manager::check_otp_provided(&profile, otp)
         .map_err(|m| CliError::refused("OTP_REQUIRED", format!("{m}: pass the code with --otp")))?;
     if let Some(notice) = vpn_manager::extra_args_notice(&profile) {

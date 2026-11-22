@@ -1,6 +1,6 @@
 ---
 name: vpnconnect
-description: "Operate the VPN Connect VPN (FortiGate SSL VPN on macOS) with the vpnconnect CLI: connect and disconnect a VPN, read the VPN status, follow the session live, manage Profiles (add, edit, remove, saved password, trusted certificates), change the app settings and check or install the Helper. Use when the user asks to connect or disconnect the VPN, whether the VPN is up, why the internal network, a cluster or an internal host is unreachable, or to create or change a VPN Profile."
+description: "Operate the VPN Connect VPN (FortiGate SSL VPN and Check Point on macOS) with the vpnconnect CLI: connect and disconnect a VPN, read the VPN status, follow the session live, manage Profiles (add, edit, remove, saved password, trusted certificates), change the app settings and check or install the Helper. Use when the user asks to connect or disconnect the VPN, whether the VPN is up, why the internal network, a cluster or an internal host is unreachable, or to create or change a VPN Profile."
 ---
 
 # vpnconnect
@@ -29,7 +29,7 @@ The Helper answers only root and the user logged in at the Mac's console. Over S
 
 Ask the human, then wait. Never guess or work around these:
 
-- SAML login: the human signs in on the gateway page in the browser.
+- SAML login, and every Check Point login: the human signs in on the gateway or identity provider page in the browser.
 - OTP: the human reads the code from their authenticator; codes are single-use and short-lived.
 - FortiToken push: the human approves on the phone.
 - Trusting a certificate (`profile trust`, `--auto-trust`): the human decides after checking the digest.
@@ -48,8 +48,8 @@ vpnconnect connect <profile> --no-browser --timeout 300
 
 1. Run `vpnconnect status --json` first. A session already active, whoever started it, is not yours to replace: `connect` refuses with `SESSION_ACTIVE`. If it is the Profile you need, use it; otherwise tell the human.
 2. A password Profile needs `has_password: true` (`profile show`). The CLI reads the password from the Keychain without a prompt. Without it, `CREDENTIALS_MISSING`: ask the human for the password and save it (see Profiles).
-3. An OTP Profile (`otp_required: true`) needs `--otp <code>`. Ask the human for a fresh code just before you run the command. Without it, `OTP_REQUIRED`.
-4. A SAML Profile prints the login URL on stderr and opens the default browser. With `--no-browser` it only prints. A FortiToken push prints on stderr that it waits for the phone. Run `connect` in the background, read stderr, tell the human what to do (show the URL, ask for the approval) and wait for the exit.
+3. An OTP Profile (`otp_required: true`) needs `--otp <code>`. Ask the human for a fresh code just before you run the command. Without it, `OTP_REQUIRED`. A Check Point Profile takes no OTP: `--otp` on it is refused with `INVALID_ARGUMENT`.
+4. A SAML or Check Point Profile prints the login URL on stderr and opens the default browser. With `--no-browser` it only prints. A FortiToken push prints on stderr that it waits for the phone. Run `connect` in the background, read stderr, tell the human what to do (show the URL, ask for the approval) and wait for the exit.
 5. On `CERT_UNTRUSTED` the error carries `cert_digest`. Show the human the digest and the command `vpnconnect profile trust <profile> <digest>`, then stop. The human verifies the certificate and runs it. Run it yourself only when the human, having seen this digest, tells you to.
 6. `HELPER_NOT_INSTALLED` and `HELPER_OUTDATED` mean the Helper needs `vpnconnect helper install`; tell the human (see Helper).
 
@@ -86,12 +86,13 @@ vpnconnect watch
 
 ## Profiles
 
-A Profile is a saved gateway: host, port, authentication (`password` or `saml`), username, realm, OTP flag, trusted certificates, split-DNS domains.
+A Profile is a saved gateway: engine (`fortinet` or `checkpoint`), host, port, authentication (`password` or `saml`), username, realm, OTP flag, trusted certificates, split-DNS domains. A Profile saved before engines existed is `fortinet`.
 
 ```bash
 vpnconnect profile ls --json
 vpnconnect profile show <profile> --json
 vpnconnect profile add --name <name> --host <host> --auth password --username <user> --dns-domain corp.example.com
+vpnconnect profile add --engine checkpoint --name <name> --host <host> --realm <login-option>
 vpnconnect profile edit <profile> --port 443
 vpnconnect profile rm <profile>
 vpnconnect profile set-password <profile> --password-stdin
@@ -102,6 +103,8 @@ vpnconnect profile untrust <profile> <sha256>
 
 - Target a Profile by id or exact name. A partial or ambiguous name is refused (`PROFILE_NOT_FOUND`, `PROFILE_AMBIGUOUS`); take the id from `profile ls`.
 - `profile add` and `profile edit` take the same flags, and `edit` changes only the flags passed. `--dns-domain` repeats and replaces the whole list; `--clear-dns-domains` empties it.
+- `--engine fortinet|checkpoint` is a `profile add` flag only: the engine is chosen at creation and `profile edit` cannot change it. Fortinet is the default. Ask the human which one the gateway is; there is no detection.
+- A Check Point Profile always signs in through the identity provider, in the browser, with port 443 as the default. `--auth` is optional and only takes `saml`; `--username`, `--otp-required`, `--auth password` and `profile set-password` are refused with `INVALID_ARGUMENT`, on `add` and on `edit`. `--realm` holds the login option id (the gateway's id for its identity provider login); leave it out when the gateway offers a single option, and ask the human for the id when `connect` fails because the gateway offers several. No command lists the options.
 - The password goes in through stdin only, never as an argument: `printf '%s' "$PW" | vpnconnect profile set-password <profile> --password-stdin`. Read `$PW` from the human or a secret store into the pipe, not into a file. `profile show` reports `has_password`; no command prints the password.
 - `profile rm` asks nothing and deletes the saved password too. Run it only when the human asks, naming the Profile.
 - `--auto-trust` accepts whatever certificate the gateway presents. Set it only when the human asks for it for that Profile.
@@ -154,7 +157,7 @@ Without `--json`, stdout is for people. With `--json`, stdout carries only JSON,
 | `TIMEOUT` | 1 | No session within `--timeout`; the login was cancelled. Ask the human, retry once |
 | `HELPER_INSTALL_CANCELLED` | 1 | The human closed the administrator dialog; do not retry |
 | `HELPER_INSTALL_FAILED` | 1 | The install failed; report the message |
-| `INVALID_ARGUMENT` | 255 | An unknown or missing flag, a bad value or flag combination; read `--help` of the command |
+| `INVALID_ARGUMENT` | 255 | An unknown or missing flag, a bad value or flag combination (`--username`, `--otp-required`, `--auth password`, `--otp` or `set-password` on a Check Point Profile); read `--help` of the command |
 | `CLI_ERROR` | 255 | An unexpected CLI failure (IO, closed output); report the message |
 | `HELPER_UNAVAILABLE` | 255 | The Helper does not answer; `helper status`, then the human |
 | `HELPER_UNAUTHORIZED` | 255 | Not the console user, as over SSH; report and stop |
