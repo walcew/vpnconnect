@@ -182,18 +182,33 @@ impl VpnManager {
         self.profile_store.get_all()
     }
 
+    /// Único ponto de gravação de Profile, da GUI e da CLI: o Engine é fixo depois da criação e
+    /// as regras do Engine valem aqui, não só nos clientes.
     pub fn save_profile(
         &self,
         profile: VpnProfile,
         password: Option<String>,
     ) -> Result<VpnProfile, String> {
-        let profile = VpnProfile {
+        let mut profile = VpnProfile {
             dns_match_domains: Self::normalize_dns_domains(&profile.dns_match_domains)?,
             ..profile
         };
+        if !profile.id.is_empty() {
+            if let Some(existing) = self.profile_store.get_by_id(&profile.id)? {
+                if existing.engine != profile.engine {
+                    return Err(format!(
+                        "The engine of profile '{}' cannot be changed after it is created",
+                        existing.name
+                    ));
+                }
+            }
+        }
+        profile.normalize_for_engine();
+        let engine = profile.engine;
         let saved = self.profile_store.upsert(profile)?;
         if let Some(pwd) = password {
-            if !pwd.is_empty() {
+            // O Check Point não tem senha.
+            if !pwd.is_empty() && engine == Engine::Fortinet {
                 keychain::set_password(&saved.id, &pwd)?;
             }
         }
@@ -333,6 +348,51 @@ mod tests {
         profile.extra_args = vec!["--foo".to_string()];
         let notice = extra_args_notice(&profile).unwrap();
         assert!(notice.contains("extra_args") && notice.contains("Corp"), "{}", notice);
+    }
+
+    fn manager_in_temp_dir() -> (VpnManager, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("vpnconnect-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mgr = VpnManager {
+            state: ConnectionState::Disconnected,
+            profile_store: ProfileStore::with_path(dir.join("profiles.json")),
+            selected_profile_id: None,
+        };
+        (mgr, dir)
+    }
+
+    #[test]
+    fn test_save_profile_refuses_changing_the_engine() {
+        let (mgr, dir) = manager_in_temp_dir();
+        let saved = mgr.save_profile(VpnProfile { name: "Corp".into(), ..VpnProfile::default() }, None).unwrap();
+
+        let err = mgr.save_profile(VpnProfile { engine: Engine::Checkpoint, ..saved.clone() }, None).unwrap_err();
+
+        assert!(err.contains("engine") && err.contains("Corp"), "{err}");
+        assert_eq!(mgr.get_profiles().unwrap()[0].engine, Engine::Fortinet);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn test_save_profile_checkpoint_is_always_saml_without_credentials() {
+        let (mgr, dir) = manager_in_temp_dir();
+        let profile = VpnProfile {
+            name: "Cp".into(),
+            engine: Engine::Checkpoint,
+            auth_type: AuthType::Password,
+            username: Some("alice".into()),
+            otp_required: true,
+            ..VpnProfile::default()
+        };
+
+        let saved = mgr.save_profile(profile, Some("s3cret".into())).unwrap();
+
+        assert_eq!((saved.auth_type.clone(), saved.username.clone(), saved.otp_required), (AuthType::Saml, None, false));
+        assert_eq!(mgr.get_profiles().unwrap()[0].auth_type, AuthType::Saml);
+        // Nunca chegou ao Keychain.
+        assert_eq!(keychain::get_password(&saved.id).unwrap(), None);
+        let _ = keychain::delete_password(&saved.id);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

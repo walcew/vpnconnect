@@ -7,6 +7,9 @@ use serde_json::{json, Value};
 
 use super::args::{self, Auth, Fields, ProfileCmd};
 use super::{output, target, CliError, Out};
+
+/// Por que o Check Point recusa usuário, senha e OTP; nas mensagens de `INVALID_ARGUMENT`.
+pub(super) const CHECKPOINT_IDP: &str = "it signs in through the identity provider, in the browser";
 use crate::keychain;
 use crate::models::{AuthType, Engine, VpnProfile};
 use crate::vpn_manager::VpnManager;
@@ -24,11 +27,8 @@ pub fn run(out: &Out, cmd: ProfileCmd) -> Result<(), CliError> {
                 args::Engine::Fortinet => Engine::Fortinet,
                 args::Engine::Checkpoint => Engine::Checkpoint,
             };
-            // Check Point entra sempre por SAML, na porta padrão dele.
+            // A autenticação do Check Point (SAML) vem da regra do `save_profile`.
             let mut p = VpnProfile { engine, port: engine.default_port(), ..VpnProfile::default() };
-            if engine == Engine::Checkpoint {
-                p.auth_type = AuthType::Saml;
-            }
             apply(&mut p, Some(name), Some(host), &fields)?;
             ensure_name_free(&mgr, &p)?;
             save(out, &mgr, p)?;
@@ -51,7 +51,7 @@ pub fn run(out: &Out, cmd: ProfileCmd) -> Result<(), CliError> {
         ProfileCmd::SetPassword { profile, .. } => {
             let p = target::resolve(&profile)?;
             if p.engine == Engine::Checkpoint {
-                return Err(CliError::failure("INVALID_ARGUMENT", "A Check Point Profile has no password: it signs in through the identity provider"));
+                return Err(CliError::failure("INVALID_ARGUMENT", format!("A Check Point Profile has no password: {CHECKPOINT_IDP}")));
             }
             keychain::set_password(&p.id, &read_password()?).map_err(CliError::cli)?;
             print(out, &p)?;
@@ -96,7 +96,7 @@ fn apply(p: &mut VpnProfile, name: Option<String>, host: Option<String>, f: &Fie
         if let Some(flag) = refused {
             return Err(CliError::failure(
                 "INVALID_ARGUMENT",
-                format!("{flag} does not apply to a Check Point Profile: it signs in through the identity provider, in the browser"),
+                format!("{flag} does not apply to a Check Point Profile: {CHECKPOINT_IDP}"),
             ));
         }
     }

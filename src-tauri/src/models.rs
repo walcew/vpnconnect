@@ -79,6 +79,16 @@ impl Default for VpnProfile {
 }
 
 impl VpnProfile {
+    /// A regra do Engine sobre o que o Profile guarda, comum à GUI e à CLI: o Check Point entra
+    /// sempre por SAML, sem usuário nem OTP. Chamada em `VpnManager::save_profile`.
+    pub fn normalize_for_engine(&mut self) {
+        if self.engine == Engine::Checkpoint {
+            self.auth_type = AuthType::Saml;
+            self.username = None;
+            self.otp_required = false;
+        }
+    }
+
     /// Profile Fortinet com senha que exige OTP a cada conexão; o Check Point entra só pelo IdP.
     pub fn needs_otp(&self) -> bool {
         self.engine == Engine::Fortinet && self.auth_type == AuthType::Password && self.otp_required
@@ -237,6 +247,23 @@ mod tests {
         assert!(!profile(AuthType::Saml, false).needs_otp());
         let checkpoint = VpnProfile { engine: Engine::Checkpoint, ..profile(AuthType::Password, true) };
         assert!(!checkpoint.needs_otp());
+    }
+
+    #[test]
+    fn test_normalize_for_engine() {
+        let mut checkpoint = VpnProfile {
+            engine: Engine::Checkpoint,
+            username: Some("alice".into()),
+            otp_required: true,
+            ..VpnProfile::default()
+        };
+        checkpoint.normalize_for_engine();
+        assert_eq!((checkpoint.auth_type, checkpoint.username, checkpoint.otp_required), (AuthType::Saml, None, false));
+
+        // O Fortinet fica como está.
+        let mut fortinet = VpnProfile { username: Some("alice".into()), otp_required: true, ..VpnProfile::default() };
+        fortinet.normalize_for_engine();
+        assert_eq!((fortinet.auth_type, fortinet.username.as_deref(), fortinet.otp_required), (AuthType::Password, Some("alice"), true));
     }
 
     #[test]

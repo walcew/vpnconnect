@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
+use super::profile::CHECKPOINT_IDP;
 use super::{status, target, CliError, Out};
 use crate::helper_client::{self, Cause, Channel, HelperError};
 use crate::models::Engine;
@@ -17,7 +18,7 @@ const INSTALL_HINT: &str = "run `vpnconnect helper install`";
 pub fn run(out: &Out, target: &str, otp: Option<&str>, timeout: u64, no_browser: bool) -> Result<(), CliError> {
     let profile = target::resolve(target)?;
     if otp.is_some() && profile.engine == Engine::Checkpoint {
-        return Err(CliError::failure("INVALID_ARGUMENT", "--otp does not apply to a Check Point Profile: it signs in through the identity provider"));
+        return Err(CliError::failure("INVALID_ARGUMENT", format!("--otp does not apply to a Check Point Profile: {CHECKPOINT_IDP}")));
     }
     vpn_manager::check_otp_provided(&profile, otp)
         .map_err(|m| CliError::refused("OTP_REQUIRED", format!("{m}: pass the code with --otp")))?;
