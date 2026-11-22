@@ -56,7 +56,7 @@ pub enum Cause {
 
 impl Cause {
     /// Valor desconhecido (de um Helper mais novo) vira None: sem notificação.
-    fn parse(v: &Value) -> Option<Self> {
+    pub(crate) fn parse(v: &Value) -> Option<Self> {
         match v.as_str()? {
             "tunnel-dropped" => Some(Self::TunnelDropped),
             "expired" => Some(Self::Expired),

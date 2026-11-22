@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::{status, target, CliError, Out};
-use crate::helper_client::{self, Channel, HelperError};
+use crate::helper_client::{self, Cause, Channel, HelperError};
 use crate::settings_store::SettingsStore;
 use crate::{helper_installer, paths, vpn_manager};
 
@@ -98,7 +98,7 @@ fn failure(frame: &Value) -> CliError {
         return CliError { cert_digest: Some(digest.to_string()), ..CliError::refused("CERT_UNTRUSTED", message) };
     }
     match reason {
-        Some(r) if frame["cause"] == "login-failed" => CliError::refused("LOGIN_FAILED", r),
+        Some(r) if Cause::parse(&frame["cause"]) == Some(Cause::LoginFailed) => CliError::refused("LOGIN_FAILED", r),
         Some(r) => CliError::refused("CONNECT_FAILED", r),
         None => CliError::refused("CONNECT_CANCELLED", "The login was cancelled before the session came up"),
     }

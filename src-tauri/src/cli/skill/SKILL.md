@@ -148,7 +148,7 @@ Without `--json`, stdout is for people. With `--json`, stdout carries only JSON,
 | `CREDENTIALS_MISSING` | 1 | No saved password; ask the human, then `profile set-password` |
 | `SESSION_ACTIVE` | 1 | A session is already up; keep it (see Connect) |
 | `CERT_UNTRUSTED` | 1 | The gateway certificate is unknown; show `cert_digest` to the human |
-| `LOGIN_FAILED` | 1 | The gateway rejected the login (password, OTP); ask the human, do not loop |
+| `LOGIN_FAILED` | 1 | The gateway rejected the login (password, OTP, push or the browser login, SAML/IdP); ask the human, do not loop |
 | `CONNECT_FAILED` | 1 | The session failed after login; report the message |
 | `CONNECT_CANCELLED` | 1 | The login ended before the session came up; ask whether to retry |
 | `TIMEOUT` | 1 | No session within `--timeout`; the login was cancelled. Ask the human, retry once |
