@@ -54,6 +54,8 @@ fn drop_notice(was_connected: bool, cause: Option<Cause>) -> Option<(&'static st
     match cause.filter(|_| was_connected)? {
         Cause::TunnelDropped => Some(("Disconnected: tunnel dropped", RECONNECT_HINT)),
         Cause::Expired => Some(("Session expired", RECONNECT_HINT)),
+        // A recusa de login não é queda: o erro já aparece no estado, sem aviso nem reconexão.
+        Cause::LoginFailed => None,
     }
 }
 
@@ -284,6 +286,8 @@ mod tests {
     fn login_error_and_normal_disconnect_do_not_notify() {
         assert!(drop_notice(true, None).is_none());
         assert!(drop_notice(false, None).is_none());
+        // Recusa de login nunca é queda: sem aviso e sem oferta de reconectar, nem a partir de connected.
+        assert!(drop_notice(true, Some(Cause::LoginFailed)).is_none());
         // Causa sem ter passado por connected (ex.: canal aberto depois da queda já notificada).
         assert!(drop_notice(false, Some(Cause::Expired)).is_none());
     }

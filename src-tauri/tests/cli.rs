@@ -122,6 +122,14 @@ fn help_exits_zero() {
 }
 
 #[test]
+fn status_and_watch_help_list_the_login_failed_cause() {
+    for cmd in ["status", "watch"] {
+        let out = Home::new().run(&[cmd, "--help"]);
+        assert!(text(&out.stdout).contains("login-failed"), "{cmd}: {}", text(&out.stdout));
+    }
+}
+
+#[test]
 fn status_json_is_the_helper_state_plus_the_profile() {
     let home = Home::new();
     home.profiles(json!([profile("p1", "Corp")]));
@@ -182,6 +190,15 @@ fn status_text_shows_why_the_session_went_down() {
     for expected in ["disconnected", "Tunnel dropped", "tunnel-dropped"] {
         assert!(stdout.contains(expected), "missing {expected} in:\n{stdout}");
     }
+}
+
+#[test]
+fn status_shows_the_login_failed_cause_as_it_comes() {
+    let home = Home::new();
+    let state = json!({"state": "disconnected", "reason": "Login failed: invalid username or password", "cause": "login-failed"});
+    let _helper = FakeHelper::with_state(&home.socket(), state.clone());
+    assert!(text(&home.run(&["status"]).stdout).contains("login-failed"));
+    assert_eq!(json_out(&home.run(&["status", "--json"]))["cause"], "login-failed");
 }
 
 #[test]
@@ -366,7 +383,7 @@ fn connect_with_an_untrusted_certificate_fails_with_the_digest() {
 #[test]
 fn connect_with_a_wrong_password_fails_with_login_failed() {
     let home = home_with_corp(&[]);
-    let _helper = FakeHelper::idle(&home.socket(), vec![state(json!({"state": "disconnected", "reason": "Login failed: invalid username or password"}))]);
+    let _helper = FakeHelper::idle(&home.socket(), vec![state(json!({"state": "disconnected", "reason": "Login failed: invalid username or password", "cause": "login-failed"}))]);
 
     let out = home.run(&["connect", "Corp", "--json"]);
 
@@ -374,6 +391,28 @@ fn connect_with_a_wrong_password_fails_with_login_failed() {
     let err = json_err(&out);
     assert_eq!(err["error"]["code"], "LOGIN_FAILED");
     assert!(err["error"]["message"].as_str().unwrap().contains("invalid username or password"), "{err}");
+}
+
+#[test]
+fn connect_with_cause_login_failed_fails_with_login_failed_whatever_the_reason() {
+    let home = home_with_corp(&[]);
+    let _helper = FakeHelper::idle(&home.socket(), vec![state(json!({"state": "disconnected", "reason": "The identity provider refused the login", "cause": "login-failed"}))]);
+
+    let out = home.run(&["connect", "Corp", "--json"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    let err = json_err(&out);
+    assert_eq!(err["error"]["code"], "LOGIN_FAILED");
+    assert!(err["error"]["message"].as_str().unwrap().contains("identity provider refused"), "{err}");
+}
+
+#[test]
+fn connect_with_a_login_failed_text_but_no_cause_fails_with_connect_failed() {
+    let home = home_with_corp(&[]);
+    let _helper = FakeHelper::idle(&home.socket(), vec![state(json!({"state": "disconnected", "reason": "Login failed: invalid username or password"}))]);
+    let out = home.run(&["connect", "Corp", "--json"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(json_err(&out)["error"]["code"], "CONNECT_FAILED");
 }
 
 #[test]

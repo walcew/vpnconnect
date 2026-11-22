@@ -37,11 +37,14 @@ enum End {
     Stopped,
     /// Falha antes de conectar (login, túnel, camada de rede).
     Failed(String),
+    /// O gateway recusou o login: `disconnected` com `cause: login-failed`.
+    Refused(String),
     /// Já conectada, caiu ou expirou.
     Lost(String, Cause),
 }
 
-/// Por que uma sessão conectada caiu sem o usuário pedir; a GUI oferece reconectar.
+/// Por que a sessão terminou sem o usuário pedir. `TunnelDropped` e `Expired` são de uma sessão
+/// conectada, e a GUI oferece reconectar; `LoginFailed` é a recusa do login, sem reconectar.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Cause {
@@ -49,6 +52,8 @@ pub enum Cause {
     TunnelDropped,
     /// Chegou o `expires_at` (`auth-timeout` do gateway).
     Expired,
+    /// O gateway recusou o login (senha, OTP, push, provedor de identidade): nunca chegou a conectar.
+    LoginFailed,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -61,7 +66,8 @@ pub enum State {
         /// sha256 hex do certificado recusado, quando a causa é certificado não confiável.
         #[serde(skip_serializing_if = "Option::is_none")]
         cert_digest: Option<String>,
-        /// Só quando uma sessão conectada caiu ou expirou; ausente em erro de login e desconexão normal.
+        /// Quando uma sessão conectada caiu ou expirou, ou o gateway recusou o login; ausente nas
+        /// outras falhas antes de conectar e na desconexão normal.
         #[serde(skip_serializing_if = "Option::is_none")]
         cause: Option<Cause>,
     },
@@ -277,6 +283,7 @@ impl Session {
             let (reason, cause) = match run.await {
                 Ok(End::Stopped) => (None, None),
                 Ok(End::Failed(reason)) => (Some(reason), None),
+                Ok(End::Refused(reason)) => (Some(reason), Some(Cause::LoginFailed)),
                 Ok(End::Lost(reason, cause)) => (Some(reason), Some(cause)),
                 Err(e) => {
                     session.teardown();
@@ -366,8 +373,8 @@ impl Session {
         tokio::select! {
             r = engine.login(credentials, &waiting) => match r {
                 Ok(()) => {}
-                // shortcut: recusa e outra falha saem iguais no `disconnected`, separar quando entrar o `cause: login-failed` (#45).
-                Err(LoginError::Refused(e) | LoginError::Failed(e)) => return End::Failed(e),
+                Err(LoginError::Refused(e)) => return End::Refused(e),
+                Err(LoginError::Failed(e)) => return End::Failed(e),
             },
             _ = cancel.notified() => return End::Stopped,
         };
@@ -649,6 +656,7 @@ mod tests {
         let state = connect_with(&mut c, &gw, "wrong").await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("invalid username or password"), "{}", state);
+        assert_eq!(state["cause"], "login-failed", "{}", state);
         assert!(state.get("cert_digest").is_none(), "{}", state);
         assert!(os.calls().is_empty());
     }
@@ -714,6 +722,7 @@ mod tests {
         };
         assert!(state["reason"].as_str().unwrap().contains(&gw.digest), "{}", state);
         assert_eq!(state["cert_digest"], gw.digest);
+        assert!(state.get("cause").is_none(), "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -757,6 +766,7 @@ mod tests {
         let reason = state["reason"].as_str().unwrap();
         assert!(reason.contains(&gw.digest) && reason.contains("UnknownIssuer"), "{}", state);
         assert_eq!(state["cert_digest"], gw.digest);
+        assert!(state.get("cause").is_none(), "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -770,6 +780,7 @@ mod tests {
         let reason = state["reason"].as_str().unwrap();
         assert!(reason.contains(&gw.digest) && reason.to_lowercase().contains("name"), "{}", state);
         assert_eq!(state["cert_digest"], gw.digest);
+        assert!(state.get("cause").is_none(), "{}", state);
     }
 
     #[tokio::test]
@@ -1110,6 +1121,7 @@ mod tests {
         let (_gw, _c, os, state) = connect_to_token_gateway(GatewayOptions { require_otp: true, ..Default::default() }, Some("000000")).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("invalid or expired OTP"), "{}", state);
+        assert_eq!(state["cause"], "login-failed", "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1118,6 +1130,7 @@ mod tests {
         let (_gw, _c, os, state) = connect_to_token_gateway(GatewayOptions { require_otp: true, ..Default::default() }, None).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("requires an OTP"), "{}", state);
+        assert!(state.get("cause").is_none(), "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1143,6 +1156,7 @@ mod tests {
         let state = next_state(&mut c).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("push"), "{}", state);
+        assert_eq!(state["cause"], "login-failed", "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1165,6 +1179,7 @@ mod tests {
         let state = next_state(&mut c).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("push notification expired"), "{}", state);
+        assert_eq!(state["cause"], "login-failed", "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1174,6 +1189,7 @@ mod tests {
         let (_gw, _c, os, state) = connect_to_token_gateway(options, Some(OTP)).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("incomplete login challenge"), "{}", state);
+        assert_eq!(state["cause"], "login-failed", "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1361,6 +1377,7 @@ mod tests {
         let state = next_state(&mut c).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("no session cookie"), "{}", state);
+        assert_eq!(state["cause"], "login-failed", "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1383,6 +1400,7 @@ mod tests {
         let state = next_state(&mut c).await;
         assert_eq!(state["state"], "disconnected");
         assert!(state["reason"].as_str().unwrap().contains("SAML login timed out after 1 s"), "{}", state);
+        assert!(state.get("cause").is_none(), "{}", state);
         assert!(os.calls().is_empty());
     }
 
@@ -1419,6 +1437,7 @@ mod tests {
         assert_eq!(state["state"], "disconnected");
         let reason = state["reason"].as_str().unwrap();
         assert!(reason.contains(&format!("port {} is already in use", gw.sso_port)) && reason.contains("FortiClient"), "{}", reason);
+        assert!(state.get("cause").is_none(), "{}", state);
         assert!(os.calls().is_empty());
     }
 

@@ -28,7 +28,7 @@ pub enum Cmd {
     /// Show the VPN session: state, IP, connected since, expiry, DNS and Profile
     #[command(long_about = "Show the VPN session: state, IP, connected since, expiry, DNS servers and \
         suffixes, and the Profile. After a disconnect, shows the reason and the cause (tunnel-dropped, \
-        expired).\n\n\
+        expired, login-failed).\n\n\
         With --json, prints the Helper's state as-is (state, profile_id, ip, since, expires_at, \
         dns_servers, dns_suffixes, url, reason, cause, cert_digest; only the fields of the current \
         state) plus \"profile\": {\"id\", \"name\"}, or null when no session is active. \"name\" is \
@@ -77,7 +77,7 @@ pub enum Cmd {
         after_help = "Each line has an \"event\" field that says which one it is:\n\
             \x20 {\"event\":\"state\",\"state\":\"connected\",\"profile_id\":\"…\",\"ip\":\"10.0.0.2\",\"since\":\"…\",\"expires_at\":\"…\",\"dns_servers\":[…],\"dns_suffixes\":[…],\"profile\":{\"id\":\"…\",\"name\":\"…\"}}\n\
             \x20   the session state, the same fields as `status --json` plus \"event\"; the other states are \"connecting\",\n\
-            \x20   \"waiting-saml\" (with \"url\"), \"waiting-push\" and \"disconnected\" (with \"reason\", \"cause\" or \"cert_digest\" when they apply)\n\
+            \x20   \"waiting-saml\" (with \"url\"), \"waiting-push\" and \"disconnected\" (with \"reason\", \"cause\" (tunnel-dropped, expired, login-failed) or \"cert_digest\" when they apply)\n\
             \x20 {\"event\":\"log\",\"line\":\"…\"}                                  a line of the Helper's session log\n\
             \x20 {\"event\":\"bandwidth\",\"rx_bytes\":1024,\"tx_bytes\":512}      session totals in IP bytes, every few seconds\n\
             \x20 {\"event\":\"expiring\",\"expires_at\":\"…\"}                      the session expires soon (once per session)\n\

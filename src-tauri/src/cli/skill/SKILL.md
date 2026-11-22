@@ -61,7 +61,7 @@ Ctrl-C or SIGINT during `connect` cancels the pending login and exits 130. After
 vpnconnect status --json
 ```
 
-Prints the Helper's state as-is plus `profile` (`{"id","name"}`, or `null` without a session; `name` is `null` if the Profile no longer exists here). `state` is `disconnected`, `connecting`, `waiting-saml` (with `url`), `waiting-push` or `connected`. A connected session has `ip`, `since`, `expires_at`, `dns_servers` and `dns_suffixes`. After a drop, `disconnected` carries `reason` and `cause` (`tunnel-dropped`, `expired`).
+Prints the Helper's state as-is plus `profile` (`{"id","name"}`, or `null` without a session; `name` is `null` if the Profile no longer exists here). `state` is `disconnected`, `connecting`, `waiting-saml` (with `url`), `waiting-push` or `connected`. A connected session has `ip`, `since`, `expires_at`, `dns_servers` and `dns_suffixes`. After a drop, `disconnected` carries `reason` and `cause` (`tunnel-dropped`, `expired`); a login the gateway refused also ends in `disconnected` with `reason` and `cause` `login-failed`.
 
 When an internal host is unreachable, read `status` before anything else:
 

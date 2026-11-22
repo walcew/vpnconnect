@@ -45,11 +45,13 @@ pub enum Incoming {
     Bandwidth(Totals),
 }
 
-/// `cause` do `disconnected`: por que uma sessão conectada caiu.
+/// `cause` do `disconnected`: por que uma sessão conectada caiu, ou `LoginFailed` se o gateway
+/// recusou o login.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Cause {
     TunnelDropped,
     Expired,
+    LoginFailed,
 }
 
 impl Cause {
@@ -58,6 +60,7 @@ impl Cause {
         match v.as_str()? {
             "tunnel-dropped" => Some(Self::TunnelDropped),
             "expired" => Some(Self::Expired),
+            "login-failed" => Some(Self::LoginFailed),
             _ => None,
         }
     }
@@ -564,6 +567,8 @@ mod tests {
     fn cause_and_expiring_are_read_from_the_frames() {
         let frame = event(json!({"event": "state", "state": "disconnected", "reason": "Session expired", "cause": "expired"}));
         assert!(matches!(parse_frame(&frame), Some(Incoming::State { cause: Some(Cause::Expired), .. })));
+        let frame = event(json!({"event": "state", "state": "disconnected", "reason": "Login failed: x", "cause": "login-failed"}));
+        assert!(matches!(parse_frame(&frame), Some(Incoming::State { cause: Some(Cause::LoginFailed), .. })));
         let frame = event(json!({"event": "state", "state": "disconnected", "reason": "x", "cause": "something-new"}));
         assert!(matches!(parse_frame(&frame), Some(Incoming::State { cause: None, .. })));
         let frame = event(json!({"event": "expiring", "expires_at": "2026-01-01T10:00:00Z"}));

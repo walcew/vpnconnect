@@ -28,11 +28,12 @@ pub enum Waiting {
 
 /// Por que o login falhou.
 pub enum LoginError {
-    /// O gateway recusou o login. No Fortinet, os casos cuja razão começa com "Login failed":
-    /// usuário ou senha, OTP, push negado ou expirado e desafio de token incompleto.
+    /// O gateway recusou o login; a sessão marca o `disconnected` com `cause: login-failed`. No
+    /// Fortinet: usuário ou senha, OTP, push negado ou expirado, desafio de token incompleto e
+    /// SAML sem cookie de sessão.
     Refused(String),
-    /// Qualquer outra falha. No Fortinet: rede, TLS, OTP exigido e não informado e tudo do
-    /// SAML (porta local ocupada, prazo do navegador, gateway sem cookie).
+    /// Qualquer outra falha. No Fortinet: rede, TLS, OTP exigido e não informado e o resto
+    /// do SAML (porta local ocupada, prazo do navegador).
     Failed(String),
 }
 

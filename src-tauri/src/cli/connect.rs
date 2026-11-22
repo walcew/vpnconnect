@@ -98,8 +98,7 @@ fn failure(frame: &Value) -> CliError {
         return CliError { cert_digest: Some(digest.to_string()), ..CliError::refused("CERT_UNTRUSTED", message) };
     }
     match reason {
-        // shortcut: o prefixo é o texto das recusas de login em helper/src/fortinet; troca por um campo se o protocolo ganhar um.
-        Some(r) if r.starts_with("Login failed") => CliError::refused("LOGIN_FAILED", r),
+        Some(r) if frame["cause"] == "login-failed" => CliError::refused("LOGIN_FAILED", r),
         Some(r) => CliError::refused("CONNECT_FAILED", r),
         None => CliError::refused("CONNECT_CANCELLED", "The login was cancelled before the session came up"),
     }

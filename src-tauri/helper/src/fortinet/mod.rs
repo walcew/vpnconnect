@@ -219,11 +219,12 @@ impl Fortinet {
     }
 
     /// Login SAML pelo navegador externo. `waiting` recebe a URL que a GUI abre no navegador,
-    /// depois que o listener local já está de pé. Devolve só a razão da falha: no `login`,
-    /// toda falha do SAML vira `LoginError::Failed`.
-    async fn saml_login(&self, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<String, String> {
+    /// depois que o listener local já está de pé. Só o gateway sem cookie de sessão é recusa
+    /// (`Refused`); o resto (rede, porta ocupada, prazo do navegador) é `Failed`.
+    async fn saml_login(&self, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<String, LoginError> {
+        use LoginError::Failed;
         let host = self.host_header();
-        let info = self.request("GET", "/remote/info", &host, None, None).await?;
+        let info = self.request("GET", "/remote/info", &host, None, None).await.map_err(Failed)?;
         let body = if (200..300).contains(&info.status) { String::from_utf8_lossy(&info.body).into_owned() } else { String::new() };
         let port = info_number(&body, "sso_port").and_then(|p| u16::try_from(p).ok());
         let secs = info_number(&body, "remoteauthtimeout");
@@ -238,13 +239,14 @@ impl Fortinet {
         let port = port.unwrap_or(DEFAULT_SSO_PORT);
         let timeout = Duration::from_secs(secs.unwrap_or(DEFAULT_SAML_TIMEOUT));
 
-        let listener = browser_login::listen(port, "FortiClient").await?;
+        let listener = browser_login::listen(port, "FortiClient").await.map_err(Failed)?;
         waiting(Waiting::Browser(format!("https://{}/remote/saml/start?redirect=1", host)));
         let id = tokio::time::timeout(timeout, browser_login::wait_for(listener, saml::extract_id))
             .await
-            .map_err(|_| format!("SAML login timed out after {} s", timeout.as_secs()))??;
+            .map_err(|_| Failed(format!("SAML login timed out after {} s", timeout.as_secs())))?
+            .map_err(Failed)?;
 
-        let resp = self.request("GET", &format!("/remote/saml/auth_id?id={}", id), &host, None, None).await?;
+        let resp = self.request("GET", &format!("/remote/saml/auth_id?id={}", id), &host, None, None).await.map_err(Failed)?;
         if let Some(c) = session_cookie(&resp) {
             return Ok(c);
         }
@@ -252,15 +254,16 @@ impl Fortinet {
         let cookies = resp.cookies();
         let resp = self
             .request("POST", "/remote/logincheck", &host, Some(&cookies).filter(|c| !c.is_empty()).map(String::as_str), Some(SAML_LOGINCHECK))
-            .await?;
-        session_cookie(&resp).ok_or_else(|| "SAML login failed: the gateway returned no session cookie".into())
+            .await
+            .map_err(Failed)?;
+        session_cookie(&resp).ok_or_else(|| LoginError::Refused("SAML login failed: the gateway returned no session cookie".into()))
     }
 }
 
 impl engine::Engine for Fortinet {
     async fn login(&mut self, credentials: &Credentials, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<(), LoginError> {
         let cookie = match self.auth {
-            Auth::Saml => self.saml_login(waiting).await.map_err(LoginError::Failed)?,
+            Auth::Saml => self.saml_login(waiting).await?,
             Auth::Password => self.password_login(credentials, waiting).await?,
         };
         self.cookie = Some(cookie);
