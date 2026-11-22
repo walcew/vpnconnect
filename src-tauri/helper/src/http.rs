@@ -2,6 +2,9 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+/// Teto da resposta inteira (cabeçalho e corpo): o gateway não é confiável e o Helper roda como root.
+const MAX_RESPONSE: usize = 4 << 20;
+
 /// Sem `Debug` de propósito: guarda o `Set-Cookie` com o cookie de sessão.
 pub struct Response {
     pub status: u16,
@@ -47,6 +50,9 @@ pub async fn read_response<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Respo
             Err(e) => return Err(e.to_string()),
         };
         buf.extend_from_slice(&chunk[..n]);
+        if buf.len() > MAX_RESPONSE {
+            return Err(format!("response larger than {} bytes", MAX_RESPONSE));
+        }
         if let Some(resp) = parse_response(&buf, n == 0)? {
             return Ok(resp);
         }
@@ -104,12 +110,17 @@ fn dechunk(mut data: &[u8]) -> Option<Vec<u8>> {
         if size == 0 {
             return Some(body);
         }
-        if data.len() < size + 2 {
+        if data.len().saturating_sub(2) < size {
             return None;
         }
         body.extend_from_slice(&data[..size]);
         data = &data[size + 2..];
     }
+}
+
+/// Valor do cabeçalho `Host`: a porta só aparece fora da 443.
+pub fn host_header(host: &str, port: u16) -> String {
+    if port == 443 { host.to_string() } else { format!("{}:{}", host, port) }
 }
 
 /// `application/x-www-form-urlencoded` de um valor.
@@ -132,5 +143,17 @@ mod tests {
         let full = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nabcd\r\n2\r\nef\r\n0\r\n\r\n";
         assert!(parse_response(&full[..full.len() - 7], false).unwrap().is_none());
         assert_eq!(parse_response(full, false).unwrap().unwrap().body, b"abcdef");
+        // Tamanho de chunk absurdo não estoura a conta.
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\nab", false).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn response_above_the_cap_is_refused() {
+        let head = b"HTTP/1.1 200 OK\r\n\r\n";
+        for body_len in [MAX_RESPONSE - head.len(), MAX_RESPONSE + 1] {
+            let data = [&head[..], &vec![b'x'; body_len]].concat();
+            let result = read_response(&mut &data[..]).await;
+            assert_eq!(result.is_ok(), body_len < MAX_RESPONSE, "{}", body_len);
+        }
     }
 }

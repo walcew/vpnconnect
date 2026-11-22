@@ -22,6 +22,7 @@ use crate::http;
 use crate::net::{Packets, TunnelConfig};
 use crate::profile::{Auth, Profile};
 use crate::tls::GatewayTls;
+use crate::LogFn;
 use sexp::Sexp;
 
 /// Porta fixa para onde o portal do gateway manda o navegador entregar o código do IdP.
@@ -30,9 +31,15 @@ const LOGIN_PORT: u16 = 7779;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Sem MTU no `hello_reply`, o mesmo valor do snx-rs.
+// shortcut: MTU fixo, sem campo conhecido no `hello_reply`, confirmar no gateway real (#52).
 const DEFAULT_MTU: u16 = 1350;
 /// Sem `keepalive` no `hello_reply` (**inf**).
 const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(20);
+/// Tetos dos `timeouts` do `hello_reply`, para um valor absurdo do gateway não estourar a conta do prazo.
+const MAX_KEEPALIVE_SECS: u64 = 3600;
+const MAX_AUTH_TIMEOUT_SECS: u64 = 30 * 24 * 3600;
+/// Teto da mensagem de erro do gateway que entra na razão do `disconnected`.
+const MAX_ERROR_MESSAGE: usize = 200;
 /// Família de cliente que o canal de controle espera (o Endpoint Security VPN); não é o sistema.
 const CLIENT_TYPE: &str = "TRAC";
 /// Retorno de sucesso no cabeçalho das respostas do canal de controle.
@@ -58,6 +65,8 @@ enum Step {
 /// O Engine Check Point de um `connect`: o gateway do Profile e, depois do login, a sessão dele.
 pub struct CheckPoint {
     host: String,
+    /// Porta do Profile, para o canal de controle e o túnel.
+    // shortcut: ignora o `tcpt_port` das informações do servidor, confirmar no gateway real (#52).
     port: u16,
     /// Id da opção de login do Profile; vazio usa a única opção de IdP.
     login_option: String,
@@ -66,10 +75,11 @@ pub struct CheckPoint {
     keepalive: Option<Duration>,
     next_id: AtomicU32,
     session: Option<GatewaySession>,
+    log: LogFn,
 }
 
 impl CheckPoint {
-    pub fn new(profile: &Profile, tls: Arc<GatewayTls>, tuning: Tuning) -> Result<Self, String> {
+    pub fn new(profile: &Profile, tls: Arc<GatewayTls>, log: LogFn, tuning: Tuning) -> Result<Self, String> {
         if profile.auth != Auth::Saml {
             return Err("Check Point profiles sign in only through the identity provider (auth saml)".into());
         }
@@ -86,11 +96,8 @@ impl CheckPoint {
             keepalive: tuning.keepalive,
             next_id: AtomicU32::new(1),
             session: None,
+            log,
         })
-    }
-
-    fn host_header(&self) -> String {
-        if self.port == 443 { self.host.clone() } else { format!("{}:{}", self.host, self.port) }
     }
 
     /// Um pedido do canal de controle; devolve o `ResponseData` de uma resposta com retorno 600.
@@ -112,7 +119,7 @@ impl CheckPoint {
         let body = Sexp::obj("CCCclientRequest", vec![("RequestHeader", Sexp::obj("", header)), ("RequestData", data)]).encode();
         let req = format!(
             "POST /clients/ HTTP/1.1\r\nHost: {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            self.host_header(),
+            http::host_header(&self.host, self.port),
             body.len(),
             body
         );
@@ -169,8 +176,29 @@ impl CheckPoint {
             },
             _ => Err(LoginError::Refused(format!(
                 "Login failed: {}",
-                reveal("error_message").filter(|m| !m.is_empty()).unwrap_or_else(|| "the gateway refused the login".into())
+                reveal("error_message")
+                    .map(|m| m.chars().filter(|c| !c.is_control()).take(MAX_ERROR_MESSAGE).collect::<String>())
+                    .filter(|m| !m.is_empty())
+                    .unwrap_or_else(|| "the gateway refused the login".into())
             ))),
+        }
+    }
+
+    /// Segundos de `timeouts:<name>` do `hello_reply`: 0 ou ausente é None, acima de `max` vira
+    /// `max` e ilegível é ignorado, os dois últimos com log.
+    fn timeout_secs(&self, reply: &Sexp, name: &str, max: u64) -> Option<u64> {
+        let text = reply.text(&format!("timeouts:{}", name))?;
+        match text.parse::<u64>() {
+            Ok(0) => None,
+            Ok(secs) if secs <= max => Some(secs),
+            Ok(secs) => {
+                (self.log)(format!("gateway {} timeout of {} s capped at {} s", name, secs, max));
+                Some(max)
+            }
+            Err(_) => {
+                (self.log)(format!("ignoring invalid gateway {} timeout", name));
+                None
+            }
         }
     }
 
@@ -285,6 +313,7 @@ impl engine::Engine for CheckPoint {
             other => return Err(format!("Unexpected tunnel answer {:?}", other)),
         }
         let ip: Ipv4Addr = reply.text("OM:ipaddr").and_then(|v| v.parse().ok()).ok_or("The gateway assigned no tunnel address")?;
+        // shortcut: sem `range` o túnel sobe sem rota (sem o pedido `ClientSettings`), confirmar no gateway real (#52).
         let routes = reply
             .get("range")
             .map(Sexp::children)
@@ -293,9 +322,9 @@ impl engine::Engine for CheckPoint {
             .filter_map(|r| Some((r.text("from")?.parse().ok()?, r.text("to")?.parse().ok()?)))
             .flat_map(|(from, to)| slim::range_to_routes(from, to))
             .collect();
-        let seconds = |path: &str| reply.text(path).and_then(|v| v.parse::<u64>().ok());
-        let auth_timeout = seconds("timeouts:authentication").filter(|s| *s > 0);
-        let keepalive = self.keepalive.unwrap_or_else(|| seconds("timeouts:keepalive").filter(|s| *s > 0).map_or(DEFAULT_KEEPALIVE, Duration::from_secs));
+        let auth_timeout = self.timeout_secs(&reply, "authentication", MAX_AUTH_TIMEOUT_SECS);
+        let keepalive = self.timeout_secs(&reply, "keepalive", MAX_KEEPALIVE_SECS).map_or(DEFAULT_KEEPALIVE, Duration::from_secs);
+        let keepalive = self.keepalive.unwrap_or(keepalive);
 
         let (to_iface, rx) = mpsc::channel(256);
         let (tx, from_iface) = mpsc::channel(256);

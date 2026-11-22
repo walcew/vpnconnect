@@ -269,7 +269,7 @@ impl Session {
                 self.start(profile, engine, credentials, tls)
             }
             EngineKind::Checkpoint => {
-                let engine = CheckPoint::new(&profile, tls.clone(), self.tuning)?;
+                let engine = CheckPoint::new(&profile, tls.clone(), log, self.tuning)?;
                 self.start(profile, engine, credentials, tls)
             }
         }

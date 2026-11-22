@@ -116,10 +116,6 @@ impl Fortinet {
         self.cookie.as_deref().ok_or_else(|| "Not logged in".to_string())
     }
 
-    fn host_header(&self) -> String {
-        if self.port == 443 { self.host.clone() } else { format!("{}:{}", self.host, self.port) }
-    }
-
     /// `cookie` é o valor inteiro do cabeçalho `Cookie`. `host` vai no cabeçalho `Host`: o do gateway, ou `sslvpn` nos passos do túnel.
     async fn request(&self, method: &str, path: &str, host: &str, cookie: Option<&str>, form: Option<&str>) -> Result<http::Response, String> {
         tokio::time::timeout(STEP_TIMEOUT, self.exchange(method, path, host, cookie, form))
@@ -172,7 +168,7 @@ impl Fortinet {
             http::form_encode(password),
             http::form_encode(&self.realm)
         );
-        let resp = self.request("POST", "/remote/logincheck", &self.host_header(), None, Some(&form)).await.map_err(LoginError::Failed)?;
+        let resp = self.request("POST", "/remote/logincheck", &http::host_header(&self.host, self.port), None, Some(&form)).await.map_err(LoginError::Failed)?;
         if let Some(c) = session_cookie(&resp) {
             return Ok(Login::Cookie(c));
         }
@@ -203,7 +199,7 @@ impl Fortinet {
             None => form.push_str("&ftm_push=1"),
         }
         form.push_str("&just_logged_in=1&ajax=1");
-        let host = self.host_header();
+        let host = http::host_header(&self.host, self.port);
         let resp = match otp {
             Some(_) => self.request("POST", "/remote/logincheck", &host, None, Some(&form)).await,
             None => tokio::time::timeout(self.push_timeout, self.exchange("POST", "/remote/logincheck", &host, None, Some(&form)))
@@ -223,7 +219,7 @@ impl Fortinet {
     /// (`Refused`); o resto (rede, porta ocupada, prazo do navegador) é `Failed`.
     async fn saml_login(&self, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<String, LoginError> {
         use LoginError::Failed;
-        let host = self.host_header();
+        let host = http::host_header(&self.host, self.port);
         let info = self.request("GET", "/remote/info", &host, None, None).await.map_err(Failed)?;
         let body = if (200..300).contains(&info.status) { String::from_utf8_lossy(&info.body).into_owned() } else { String::new() };
         let port = info_number(&body, "sso_port").and_then(|p| u16::try_from(p).ok());
@@ -316,6 +312,6 @@ impl engine::Engine for Fortinet {
 
     async fn logout(&self) -> Result<(), String> {
         let cookie = svpn_header(self.cookie()?);
-        self.request("GET", "/remote/logout", &self.host_header(), Some(&cookie), None).await.map(|_| ())
+        self.request("GET", "/remote/logout", &http::host_header(&self.host, self.port), Some(&cookie), None).await.map(|_| ())
     }
 }

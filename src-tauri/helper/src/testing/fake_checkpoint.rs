@@ -45,6 +45,8 @@ const DATA: u32 = 2;
 pub struct CheckpointOptions {
     /// Aceita o signout e nunca responde.
     pub mute_logout: bool,
+    /// O `hello_reply` anuncia `timeouts` enormes, no limite do u64.
+    pub huge_timeouts: bool,
 }
 
 struct Shared {
@@ -214,20 +216,22 @@ fn server_info() -> String {
     )
 }
 
-fn hello_reply() -> String {
+fn hello_reply(options: &CheckpointOptions) -> String {
+    let (auth, keepalive) = if options.huge_timeouts { (u64::MAX, u64::MAX) } else { (AUTH_TIMEOUT, 20) };
     let ranges: String = RANGES.iter().map(|(from, to)| format!("\n\t\t: (\n\t\t\t:from ({})\n\t\t\t:to ({}))", from, to)).collect();
     format!(
         "(hello_reply\n\t:version (1)\n\t:protocol_version (1)\n\
          \t:OM (\n\t\t:ipaddr ({})\n\t\t:dns_servers (\n\t\t\t: ({})\n\t\t\t: ({}))\n\t\t:dns_suffix (\"{}\"))\n\
          \t:range ({})\n\
-         \t:timeouts (\n\t\t:authentication ({})\n\t\t:keepalive (20))\n\
+         \t:timeouts (\n\t\t:authentication ({})\n\t\t:keepalive ({}))\n\
          \t:optional (\n\t\t:subnet (255.255.255.0)))",
         ASSIGNED_IP,
         DNS[0],
         DNS[1],
         DNS_SUFFIXES.join(","),
         ranges,
-        AUTH_TIMEOUT
+        auth,
+        keepalive
     )
 }
 
@@ -257,7 +261,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
         let _ = wr.write_all(&control("(disconnect\n\t:code (201)\n\t:message (\"Authentication failed\"))")).await;
         return;
     }
-    let _ = wr.write_all(&control(&hello_reply())).await;
+    let _ = wr.write_all(&control(&hello_reply(&shared.options))).await;
 
     let (frames_tx, mut frames) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
     tokio::spawn(async move {

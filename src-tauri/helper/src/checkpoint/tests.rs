@@ -100,13 +100,51 @@ async fn idp_login_connects_and_applies_the_gateway_network_without_leaking_secr
     assert_eq!(login.text("RequestData:client_logging_data:os_name"), Some("macOS"));
     assert_eq!(login.text("RequestData:client_logging_data:client_name"), Some("VPN Connect"));
 
-    frames.push(disconnect(&mut c).await);
+    // O signout também não pode vazar: todos os quadros até o `disconnected`, logs inclusive.
+    c.send(json!({"v": 2, "cmd": "disconnect"})).await;
+    loop {
+        let v = c.recv().await.expect("server closed the connection");
+        frames.push(v.clone());
+        if v["state"] == "disconnected" {
+            break;
+        }
+    }
+    assert_eq!(gw.logouts(), 1);
+    assert!(frames.iter().any(|f| f["line"] == "logged out"), "no signout log");
     let secrets = [ACTIVE_KEY.to_string(), crate::checkpoint::sexp::obfuscate(ACTIVE_KEY.as_bytes()), IDP_CODE.to_string()];
     for f in &frames {
         for secret in &secrets {
             assert!(!f.to_string().contains(secret.as_str()), "secret leaked: {}", f);
         }
     }
+}
+
+#[tokio::test]
+async fn huge_gateway_timeouts_are_capped_and_the_tunnel_comes_up() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions { huge_timeouts: true, ..Default::default() }).await;
+    let (path, _os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let (state, frames) = idp_connect(&mut c, &gw, gw.profile()).await;
+    let since = chrono::DateTime::parse_from_rfc3339(state["since"].as_str().unwrap()).unwrap();
+    let expires = chrono::DateTime::parse_from_rfc3339(state["expires_at"].as_str().unwrap()).unwrap();
+    let ttl = (expires - since).num_seconds();
+    assert!((30 * 24 * 3600 - 1..=30 * 24 * 3600).contains(&ttl), "{}", ttl);
+    for name in ["authentication", "keepalive"] {
+        assert!(frames.iter().any(|f| f["line"].as_str().is_some_and(|l| l.contains(name) && l.contains("capped"))), "no cap log for {}", name);
+    }
+    assert_eq!(disconnect(&mut c).await["state"], "disconnected");
+}
+
+#[test]
+fn gateway_error_message_is_cut_and_stripped_of_control_characters() {
+    use crate::checkpoint::sexp::{obfuscate, Sexp};
+    use crate::engine::LoginError;
+    let message = format!("bad\x1b[31m\nlogin{}", "x".repeat(1000));
+    let data = Sexp::obj("", vec![("authn_status", Sexp::val("done")), ("error_message", Sexp::val(obfuscate(message.as_bytes())))]);
+    let Err(LoginError::Refused(reason)) = super::CheckPoint::auth_step(&data) else { panic!("not a refusal") };
+    assert!(reason.starts_with("Login failed: bad[31mlogin"), "{}", reason);
+    assert!(!reason.chars().any(char::is_control) && reason.len() < 250, "{}", reason);
 }
 
 #[tokio::test]
@@ -176,7 +214,7 @@ async fn disconnect_signs_out_at_the_gateway_and_tears_everything_down() {
 #[tokio::test]
 async fn mute_gateway_on_signout_does_not_hold_the_disconnect() {
     let _ports = SAML_PORTS.lock().await;
-    let gw = FakeCheckpoint::start(CheckpointOptions { mute_logout: true }).await;
+    let gw = FakeCheckpoint::start(CheckpointOptions { mute_logout: true, ..Default::default() }).await;
     let (path, os) = start(&gw, None).await;
     let mut c = client(&path).await;
     idp_connect(&mut c, &gw, gw.profile()).await;

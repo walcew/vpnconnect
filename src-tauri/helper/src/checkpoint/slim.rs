@@ -83,7 +83,7 @@ fn keepalive() -> Vec<u8> {
 
 /// Conduz o túnel até ele cair e devolve o motivo. Pacotes IP fluem entre o stream e o canal da
 /// interface, e um `keepalive` sai a cada `interval` e a cada `probe`.
-// shortcut: o keepalive só sai, sem contar respostas; a queda por gateway mudo é do ticket #51.
+// shortcut: o keepalive só sai, sem contar respostas, derrubar o túnel com gateway mudo no #51.
 pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     mut buf: Vec<u8>,

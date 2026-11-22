@@ -26,14 +26,16 @@ O canal de controle e os quadros de controle do túnel levam texto numa S-expres
 		:message ("Hello world")
 		:servers (
 			: (10.0.0.1)
-			: (10.0.0.2))))
+			: (10.0.0.2))
+		:free (text here)))
 ```
 
 - Todo nó fica entre parênteses. Um objeto tem nome opcional (`CCCserverResponse`) e campos `:nome (valor)`; uma lista tem itens `: (valor)`, com espaço ou nada entre `:` e `(`; um valor é uma palavra ou um texto entre aspas.
 - `()` é o valor vazio, que também serve de objeto ou lista vazia.
-- O texto entre aspas não tem escape. Valor com algo fora de letras, dígitos, `_`, `-` e `.` sai entre aspas. Valor sem aspas com espaços vai até o `)` (**inf**).
+- O texto entre aspas não tem escape. Valor com algo fora de letras, dígitos, `_`, `-` e `.` sai entre aspas. Valor sem aspas com espaços vai até o `)`, como o `:free (text here)` da amostra, lido como `text here` (**inf**).
 - Algumas listas chegam como objeto de chaves numéricas (`:0 (...) :1 (...)`), como a lista de opções de login. O Engine lê as duas formas.
 - Espaço, tab, quebra de linha e NUL separam os elementos. O Engine escreve um campo por linha, recuado com tab, como as referências (**ref**); não se sabe se o gateway exige esse layout.
+- O Engine recusa aninhamento acima de 64 níveis, e o canal de controle recusa resposta HTTP acima de 4 MiB.
 
 ### Ofuscação
 
@@ -73,7 +75,7 @@ Os pedidos levam `client_type (TRAC)`, a família de cliente que o gateway esper
 3. **Início da autenticação**: pedido `UserPass` com `client_type`, `username` e `password` vazios (ofuscados), o `client_logging_data` e `selectedLoginOption (<id>)`. A resposta traz `authn_status (continue)`, o `session_id` da autenticação e o `prompt` ofuscado, que desofuscado é a URL do IdP (**ref**). O Engine só aceita uma URL `https://`.
 4. **Espera no navegador**: o Helper escuta em `127.0.0.1:7779`, a porta fixa para onde o portal do gateway manda o navegador no fim do login (**ref**), e só então emite `waiting-saml` com a URL do passo 3. Porta ocupada vira `disconnected` com "Local SSO port 7779 is already in use". A espera dura 120 s, o prazo do snx-rs.
 5. **Código**: o navegador chega com `GET /<código>`. O listener é o mesmo do SAML do Fortinet (`browser_login.rs`: limite de tamanho e de conexões, 400 para qualquer outro pedido e o login continua). Vale só `GET` com um código de 1 a 1024 caracteres entre letras, dígitos e `-_.~%=+` (**inf**: o formato real do código não foi visto; o snx-rs aceita também `OPTIONS`).
-6. **Resposta do desafio**: pedido `MultiChallange` (a grafia é a do protocolo), com o `session_id` da autenticação no cabeçalho e `:RequestData (:client_type (TRAC) :auth_session_id (<sessão>) :user_input (<código ofuscado>))`. A resposta de sucesso traz `authn_status (done)`, `is_authenticated (true)`, `active_key` (a chave da sessão, ofuscada), o `session_id` da sessão e `active_key_timeout`. Sem `is_authenticated (true)`, é recusa do gateway (`cause: login-failed`), com o `error_message` desofuscado quando vier.
+6. **Resposta do desafio**: pedido `MultiChallange` (a grafia é a do protocolo), com o `session_id` da autenticação no cabeçalho e `:RequestData (:client_type (TRAC) :auth_session_id (<sessão>) :user_input (<código ofuscado>))`. A resposta de sucesso traz `authn_status (done)`, `is_authenticated (true)`, `active_key` (a chave da sessão, ofuscada), o `session_id` da sessão e `active_key_timeout`. Sem `is_authenticated (true)`, é recusa do gateway (`cause: login-failed`), com o `error_message` desofuscado quando vier, sem caracteres de controle e cortado em 200 caracteres.
 
 A chave da sessão e o código do IdP ficam no Helper: não vão em evento, log nem resposta.
 
@@ -136,10 +138,11 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 | `OM:dns_servers` | servidores DNS |
 | `OM:dns_suffix` | sufixos DNS, separados por vírgula ou `;`, ou como lista |
 | `range` | redes a rotear, como intervalos `from`–`to` |
-| `timeouts:authentication` | `expires_at` = início do login + segundos; `0` ou ausente = sem expiração |
-| `timeouts:keepalive` | intervalo do keepalive em segundos; ausente vale 20 (**inf**) |
+| `timeouts:authentication` | `expires_at` = início do login + segundos; `0` ou ausente = sem expiração; teto de 30 dias |
+| `timeouts:keepalive` | intervalo do keepalive em segundos; `0` ou ausente vale 20 (**inf**); teto de 3600 |
 | `optional:subnet` | ignorado: a interface é ponto a ponto |
 
+- Valor de `timeouts` acima do teto vale o teto, e ilegível conta como ausente; os dois saem no log.
 - O MTU é 1350, o do snx-rs: nenhum campo de MTU é conhecido (**inf**).
 - Cada intervalo vira os blocos CIDR que o cobrem, do maior alinhado em diante. Amostras: `10.1.0.0`–`10.1.255.255` vira `10.1.0.0/16`; `172.16.4.0`–`172.16.6.255` vira `172.16.4.0/23` e `172.16.6.0/24`; `10.0.0.1`–`10.0.0.6` vira `.1/32`, `.2/31`, `.4/31` e `.6/32`; `0.0.0.0`–`255.255.255.255` vira a rota default, que a camada de rede aplica em duas metades. Intervalo invertido não dá rota.
 - O snx-rs descarta intervalos que começam em `0.0.0.1` e, sem `range`, pede as redes num pedido `ClientSettings`; o Engine não faz nenhum dos dois (**inf**, a confirmar no #52).

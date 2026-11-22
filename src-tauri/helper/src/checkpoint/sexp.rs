@@ -1,8 +1,15 @@
 //! S-expression do Check Point, no canal de controle e nos quadros de controle do túnel, e a
 //! ofuscação dos valores secretos. O formato está em `docs/checkpoint-protocol.md`.
 
-/// Um nó: valor, objeto (com nome opcional e campos em ordem) ou lista.
-#[derive(Debug, Clone, PartialEq)]
+use std::fmt;
+use std::num::NonZeroU8;
+
+/// Aninhamento máximo aceito do gateway; acima disso o parser recusa em vez de estourar a pilha.
+const MAX_DEPTH: usize = 64;
+
+/// Um nó: valor, objeto (com nome opcional e campos em ordem) ou lista. O `Debug` não mostra os
+/// valores, que podem ser a chave da sessão (`client_hello`).
+#[derive(Clone, PartialEq)]
 pub enum Sexp {
     /// `()` vira valor vazio, que também serve de objeto ou lista vazia.
     Value(String),
@@ -86,6 +93,22 @@ impl Sexp {
     }
 }
 
+impl fmt::Debug for Sexp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Sexp::Value(_) => f.write_str(".."),
+            Sexp::Object(name, fields) => {
+                let mut s = f.debug_struct(name.as_deref().unwrap_or_default());
+                for (k, v) in fields {
+                    s.field(k, v);
+                }
+                s.finish()
+            }
+            Sexp::Array(items) => f.debug_list().entries(items).finish(),
+        }
+    }
+}
+
 /// Entre aspas quando tem algo fora de letras, dígitos, `_`, `-` e `.`.
 fn quote(v: &str) -> String {
     if v.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b)) {
@@ -97,7 +120,7 @@ fn quote(v: &str) -> String {
 
 /// Lê uma S-expression inteira; o NUL que fecha um quadro de controle conta como espaço.
 pub fn parse(text: &str) -> Result<Sexp, String> {
-    let mut p = Parser { s: text.as_bytes(), i: 0 };
+    let mut p = Parser { s: text.as_bytes(), i: 0, depth: 0 };
     let node = p.node()?;
     p.skip_ws();
     if p.i != p.s.len() {
@@ -109,6 +132,7 @@ pub fn parse(text: &str) -> Result<Sexp, String> {
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -134,6 +158,10 @@ impl Parser<'_> {
     /// `(` conteúdo `)`.
     fn node(&mut self) -> Result<Sexp, String> {
         self.expect(b'(')?;
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err(format!("nesting deeper than {} at byte {}", MAX_DEPTH, self.i));
+        }
         self.skip_ws();
         let name = match self.peek() {
             Some(b':') | Some(b')') => None,
@@ -152,6 +180,7 @@ impl Parser<'_> {
             _ => return Err("unexpected end".into()),
         };
         self.expect(b')')?;
+        self.depth -= 1;
         Ok(node)
     }
 
@@ -211,13 +240,12 @@ impl Parser<'_> {
 /// Chave fixa da ofuscação, aplicada por posição e repetida a cada 77 bytes.
 const KEY: &[u8; 77] = b"-ODIFIED&W0ROPERTY3HEET7ITH/+4HE3HEET)$3?,$!0?!5?02/0%24)%3.5,,\x10&7?70?/\"*%#43";
 
-/// XOR de um byte com a chave da sua posição; o 0 resultante vira 255, e 255 de entrada conta
-/// como 0. Aplicada duas vezes, devolve qualquer byte ASCII de 1 a 127 (a chave é ASCII).
+/// O passo 1 da doc num byte: reduz módulo 255 (só o 255 muda, vira 0), faz XOR com a chave da
+/// posição e troca um resultado 0 por 255. Aplicada duas vezes, devolve qualquer byte ASCII de 1
+/// a 127 (a chave é ASCII).
 fn mask(i: usize, b: u8) -> u8 {
-    match (b % 255) ^ KEY[i % KEY.len()] {
-        0 => 255,
-        v => v,
-    }
+    let reduced = if b == u8::MAX { 0 } else { b };
+    NonZeroU8::new(reduced ^ KEY[i % KEY.len()]).map_or(u8::MAX, NonZeroU8::get)
 }
 
 /// Ofusca um valor secreto: máscara por posição, bytes em ordem inversa, hex minúsculo.
@@ -289,6 +317,24 @@ mod tests {
         for bad in ["", "(", "(a :b (c)", "(:a (b)) x", "(\"open)", "(: (a) :b (c))"] {
             assert!(parse(bad).is_err(), "{:?}", bad);
         }
+    }
+
+    #[test]
+    fn refuses_deep_nesting_without_overflowing_the_stack() {
+        let nested = |depth: usize| format!("{}(v){}", "(:a ".repeat(depth - 1), ")".repeat(depth - 1));
+        assert_eq!(parse(&nested(MAX_DEPTH)).unwrap().text(&vec!["a"; MAX_DEPTH - 1].join(":")), Some("v"));
+        assert!(parse(&nested(MAX_DEPTH + 1)).unwrap_err().contains("nesting"));
+        // Sem fechar, e grande o bastante para estourar a pilha sem o limite.
+        assert!(parse(&"(:a ".repeat(1_000_000)).unwrap_err().contains("nesting"));
+        assert!(parse(&"(".repeat(1_000_000)).is_err());
+    }
+
+    #[test]
+    fn debug_hides_the_values() {
+        let s = Sexp::obj("client_hello", vec![("cookie", Sexp::val("secret-key")), ("list", Sexp::Array(vec![Sexp::val("x")]))]);
+        let text = format!("{:?}", s);
+        assert!(text.contains("client_hello") && text.contains("cookie"), "{}", text);
+        assert!(!text.contains("secret-key") && !text.contains("\"x\""), "{}", text);
     }
 
     #[test]
