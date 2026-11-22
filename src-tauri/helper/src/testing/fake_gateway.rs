@@ -75,6 +75,10 @@ pub struct GatewayOptions {
     pub incomplete_challenge: bool,
     /// Acrescenta uma rota `0.0.0.0/0.0.0.0` ao split tunnel.
     pub default_route_in_split: bool,
+    /// Acrescenta ao split tunnel a rota /32 do próprio endereço do gateway (127.0.0.1).
+    pub gateway_route_in_split: bool,
+    /// Acrescenta ao split tunnel 127.0.0.0/8, rota maior que contém o endereço do gateway.
+    pub gateway_net_in_split: bool,
     /// Nenhum servidor DNS, nem no XML nem no IPCP.
     pub no_dns: bool,
     /// O `saml/auth_id` não traz o `SVPNCOOKIE`, só um cookie de sessão; o cookie vem no `logincheck` vazio.
@@ -377,6 +381,12 @@ fn xml(options: &GatewayOptions) -> String {
         let mut addrs: String = SPLIT_ROUTES.iter().map(|(ip, mask)| format!("<addr ip='{}' mask='{}'/>", ip, mask)).collect();
         if options.default_route_in_split {
             addrs.push_str("<addr ip='0.0.0.0' mask='0.0.0.0'/>");
+        }
+        if options.gateway_route_in_split {
+            addrs.push_str("<addr ip='127.0.0.1' mask='255.255.255.255'/>");
+        }
+        if options.gateway_net_in_split {
+            addrs.push_str("<addr ip='127.0.0.0' mask='255.0.0.0'/>");
         }
         format!("<split-tunnel-info>{}</split-tunnel-info>", addrs)
     };

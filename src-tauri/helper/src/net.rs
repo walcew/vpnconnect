@@ -178,6 +178,15 @@ pub fn apply(os: &dyn Os, config: &TunnelConfig, packets: Packets, applied: &Mut
     Ok(None)
 }
 
+/// Tira de `config.routes` a rota anunciada que é exatamente o /32 do gateway: ela colidiria com o
+/// /32 pela interface física. Devolve as rotas tiradas, para o chamador registrar no log.
+pub fn drop_gateway_routes(config: &mut TunnelConfig) -> Vec<Route> {
+    let IpAddr::V4(gateway) = config.gateway else { return Vec::new() };
+    let (ignored, kept) = config.routes.iter().partition(|r| r.addr == gateway && r.mask == Ipv4Addr::BROADCAST);
+    config.routes = kept;
+    ignored
+}
+
 /// Rotas pelo túnel. Uma default (máscara 0) vinda do gateway vira as duas metades,
 /// como no full tunnel: a rota default do sistema nunca é tocada.
 fn tunnel_routes(config: &TunnelConfig) -> Vec<Route> {

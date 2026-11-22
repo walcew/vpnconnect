@@ -410,6 +410,9 @@ impl Session {
         let mut tasks = JoinSet::new();
         let traffic = Traffic::default();
         let packets = meter(packets, &traffic, &mut tasks);
+        for r in net::drop_gateway_routes(&mut config) {
+            self.log(format!("ignoring advertised route {}/{}: it is the gateway's own address", r.addr, r.mask));
+        }
         match net::apply(&*self.os, &config, packets, &self.applied) {
             Ok(None) => {}
             Ok(Some(warning)) => {
@@ -646,6 +649,34 @@ mod tests {
         let mut routes: Vec<Route> = SPLIT_ROUTES.iter().map(|(a, m)| route(a, m)).collect();
         routes.extend([route("0.0.0.0", "128.0.0.0"), route("128.0.0.0", "128.0.0.0")]);
         assert_eq!(os.calls(), applied_calls(&routes));
+    }
+
+    /// Connect com log: as chamadas de SO e as linhas de log vistas até o estado conectado.
+    async fn connect_logging_to(options: GatewayOptions) -> (std::sync::Arc<FakeOs>, Vec<String>) {
+        let gw = FakeGateway::start(options).await;
+        let (path, _session, os) = start_with_os(FakeOs::default()).await;
+        let mut c = client(&path).await;
+        let (state, lines) = connect_logging(&mut c, connect_cmd(&gw, PASSWORD)).await;
+        assert_eq!(state["state"], "connected", "{}", state);
+        (os, lines)
+    }
+
+    #[tokio::test]
+    async fn route_to_the_gateway_itself_is_not_applied_through_the_tunnel() {
+        let (os, lines) = connect_logging_to(GatewayOptions { gateway_route_in_split: true, ..Default::default() }).await;
+        // As outras rotas e o /32 físico do gateway ficam como antes.
+        let routes: Vec<Route> = SPLIT_ROUTES.iter().map(|(a, m)| route(a, m)).collect();
+        assert_eq!(os.calls(), applied_calls(&routes));
+        assert!(lines.iter().any(|l| l.contains("ignoring") && l.contains("127.0.0.1/255.255.255.255")), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn larger_route_containing_the_gateway_is_still_applied() {
+        let (os, lines) = connect_logging_to(GatewayOptions { gateway_net_in_split: true, ..Default::default() }).await;
+        let mut routes: Vec<Route> = SPLIT_ROUTES.iter().map(|(a, m)| route(a, m)).collect();
+        routes.push(route("127.0.0.0", "255.0.0.0"));
+        assert_eq!(os.calls(), applied_calls(&routes));
+        assert!(!lines.iter().any(|l| l.contains("ignoring")), "{:?}", lines);
     }
 
     #[tokio::test]
