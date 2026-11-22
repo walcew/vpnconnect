@@ -1,6 +1,6 @@
 //! Gateway Check Point falso em loopback, sobre o apoio comum de `fake_server`. Implementa o canal
 //! de controle (`POST /clients/`: informações do servidor, início do login pelo IdP, resposta do
-//! desafio e signout) e o lado servidor do túnel SSL (`client_hello`, `hello_reply`, quadros de
+//! desafio, `ClientSettings` com as faixas de rede e signout) e o lado servidor do túnel SSL (`client_hello`, `hello_reply`, quadros de
 //! dados e keepalive). As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
 //! só a leitura dos pedidos e a ofuscação usam o codec do Engine, que tem testes de unidade próprios.
 //! Modos novos entram como campos em `CheckpointOptions`.
@@ -33,6 +33,8 @@ pub const DNS: [Ipv4Addr; 2] = [Ipv4Addr::new(10, 1, 0, 53), Ipv4Addr::new(10, 1
 pub const DNS_SUFFIXES: [&str; 2] = ["corp.example", "lab.example"];
 /// O último intervalo não é um bloco CIDR: vira um /23 e um /24.
 pub const RANGES: [(&str, &str); 3] = [("10.1.0.0", "10.1.255.255"), ("192.168.50.0", "192.168.50.255"), ("172.16.4.0", "172.16.6.255")];
+/// Faixa do próprio gateway (o host do Profile), que o `ClientSettings` também manda e a sessão ignora.
+pub const GATEWAY_RANGE: (&str, &str) = ("127.0.0.1", "127.0.0.1");
 /// As rotas que os `RANGES` viram, em ordem.
 pub const ROUTES: [(&str, &str); 4] =
     [("10.1.0.0", "255.255.0.0"), ("192.168.50.0", "255.255.255.0"), ("172.16.4.0", "255.255.254.0"), ("172.16.6.0", "255.255.255.0")];
@@ -59,6 +61,10 @@ pub struct CheckpointOptions {
     pub auth_timeout: Option<u64>,
     /// Responde ao `UserPass` sem `authn_status`.
     pub no_authn_status: bool,
+    /// O `hello_reply` traz os `RANGES` em `range`; o gateway de validação não traz.
+    pub hello_range: bool,
+    /// Recusa o `ClientSettings` com um retorno diferente de 600.
+    pub refuse_client_settings: bool,
 }
 
 struct Shared {
@@ -216,6 +222,16 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
             };
             response("MultiChallange", AUTH_SESSION, &data)
         }
+        "ClientSettings" if !shared.options.refuse_client_settings && body.text("RequestHeader:session_id") == Some(SESSION_ID) => {
+            let settings: String =
+                RANGES.iter().chain([&GATEWAY_RANGE]).map(|(from, to)| format!("\n\t\t\t\t: (\n\t\t\t\t\t:from ({})\n\t\t\t\t\t:to ({}))", from, to)).collect();
+            response(
+                "ClientSettings",
+                SESSION_ID,
+                &format!("\t\t:gw_internal_ip (10.1.0.1)\n\t\t:updated_policies (\n\t\t\t:range (\n\t\t\t\t:settings ({})\n\t\t\t\t:name (range)))", settings),
+            )
+        }
+        "ClientSettings" => response("ClientSettings", SESSION_ID, "").replace(":return_code (600)", ":return_code (1)"),
         "Signout" if body.text("RequestHeader:session_id") == Some(SESSION_ID) => {
             shared.logouts.fetch_add(1, Ordering::SeqCst);
             if shared.options.mute_logout {
@@ -272,17 +288,19 @@ fn hello_reply(options: &CheckpointOptions) -> String {
     let (auth, keepalive) =
         if options.huge_timeouts { (u64::MAX, u64::MAX) } else { (options.auth_timeout.unwrap_or(AUTH_TIMEOUT), options.keepalive.unwrap_or(20)) };
     let ranges: String = RANGES.iter().map(|(from, to)| format!("\n\t\t: (\n\t\t\t:from ({})\n\t\t\t:to ({}))", from, to)).collect();
+    // Como no gateway de validação, sem `range` por padrão.
+    let range = if options.hello_range { format!("\t:range ({})\n", ranges) } else { String::new() };
     format!(
         "(hello_reply\n\t:version (1)\n\t:protocol_version (1)\n\
          \t:OM (\n\t\t:ipaddr ({})\n\t\t:dns_servers (\n\t\t\t: ({})\n\t\t\t: ({}))\n\t\t:dns_suffix (\"{}\"))\n\
-         \t:range ({})\n\
+         {}\
          \t:timeouts (\n\t\t:authentication ({})\n\t\t:keepalive ({}))\n\
          \t:optional (\n\t\t:subnet (255.255.255.0)))",
         ASSIGNED_IP,
         DNS[0],
         DNS[1],
         DNS_SUFFIXES.join(","),
-        ranges,
+        range,
         auth,
         keepalive
     )

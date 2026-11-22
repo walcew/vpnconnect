@@ -62,7 +62,7 @@ Cada pedido é um `POST /clients/` numa conexão TLS nova, com `Connection: clos
 	:RequestData (...))
 ```
 
-`id` conta a partir de 1 em cada Engine. Só o `Signout` leva também `:protocol_version (100)` no cabeçalho (**ref**). A resposta é `(CCCserverResponse :ResponseHeader (... :return_code (600)) :ResponseData (...))`; o Engine exige HTTP 200, o nome `CCCserverResponse` e o retorno `600` (sucesso), e usa o `ResponseData`.
+`id` conta a partir de 1 em cada Engine. Só o `Signout` e o `ClientSettings` levam também `:protocol_version (100)` no cabeçalho (**ref**). A resposta é `(CCCserverResponse :ResponseHeader (... :return_code (600)) :ResponseData (...))`; o Engine exige HTTP 200, o nome `CCCserverResponse` e o retorno `600` (sucesso), e usa o `ResponseData`.
 
 ### Identificação do cliente
 
@@ -157,7 +157,7 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 | `OM:ipaddr` | IP do túnel (Office Mode); também vira o par da interface, porque o protocolo não dá par |
 | `OM:dns_servers` | servidores DNS |
 | `OM:dns_suffix` | sufixos DNS, separados por vírgula ou `;`, ou como lista |
-| `range` | redes a rotear, como intervalos `from`–`to` |
+| `range` | redes a rotear, como intervalos `from`–`to`; opcional, ver "Faixas de rede" |
 | `timeouts:authentication` | `expires_at` = início do login + segundos; `0` ou ausente = sem expiração; teto de 30 dias |
 | `timeouts:keepalive` | intervalo do keepalive em segundos; `0` ou ausente vale 20 (**inf**); teto de 3600 |
 | `optional:subnet` | ignorado: a interface é ponto a ponto |
@@ -165,8 +165,44 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 - Valor de `timeouts` acima do teto vale o teto, e ilegível conta como ausente; os dois saem no log.
 - O MTU é 1350, o do snx-rs: nenhum campo de MTU é conhecido (**inf**).
 - Cada intervalo vira os blocos CIDR que o cobrem, do maior alinhado em diante. Amostras: `10.1.0.0`–`10.1.255.255` vira `10.1.0.0/16`; `172.16.4.0`–`172.16.6.255` vira `172.16.4.0/23` e `172.16.6.0/24`; `10.0.0.1`–`10.0.0.6` vira `.1/32`, `.2/31`, `.4/31` e `.6/32`; `0.0.0.0`–`255.255.255.255` vira a rota default, que a camada de rede aplica em duas metades. Intervalo invertido não dá rota.
-- O snx-rs descarta intervalos que começam em `0.0.0.1` e, sem `range`, pede as redes num pedido `ClientSettings`; o Engine não faz nenhum dos dois (**inf**, a confirmar no #52).
+- O snx-rs descarta intervalos que começam em `0.0.0.1`; o Engine roteia o intervalo como vem (**inf**: o significado desse início não é conhecido).
 - Os domínios DNS do Profile substituem os sufixos do gateway, como no Fortinet.
+
+### Faixas de rede (`ClientSettings`)
+
+No gateway de validação o `hello_reply` não traz `range` (**obs**): as redes vêm de um pedido `ClientSettings` no canal de controle, que o Engine faz depois do `hello_reply` e antes de entregar o túnel à sessão, com o `session_id` da sessão autenticada (o do passo 6 do login) no cabeçalho (**ref**; é como o snx-rs obtém as rotas nesse gateway):
+
+```
+:RequestData (ClientSettings
+	:requested_policies_and_current_versions (
+		:range ()))
+```
+
+A lista `range` vazia pede a política de faixas sem versão conhecida (**inf**). A resposta traz as políticas em `updated_policies`, cada uma com `settings`, `expiry`, `id` e `name`; as faixas ficam em `updated_policies:range:settings`, uma lista de `(:from (<ip>) :to (<ip>))` (**ref**):
+
+```
+:ResponseData (
+	:gw_internal_ip (10.1.0.1)
+	:updated_policies (
+		:range (
+			:settings (
+				: (
+					:from (10.1.0.0)
+					:to (10.1.255.255)))
+			:expiry (0)
+			:name (range))))
+```
+
+- As rotas são a união das faixas do `range` do `hello_reply`, quando vier, com as do `ClientSettings`, sem repetir bloco. Cada faixa vira blocos CIDR como na seção anterior.
+- O resto da resposta (`gw_internal_ip`, outras políticas como `mep` e `scv`) é ignorado.
+- A faixa que é exatamente o /32 do próprio gateway sai das rotas, com log, como no Fortinet: ela colidiria com o /32 pela interface física.
+- Falha do `ClientSettings` (HTTP, `return_code` ou resposta ilegível) sem `range` no `hello_reply` derruba o `connect`, com `Signout`: sem rota o túnel pareceria conectado e não passaria nada. Com `range` no `hello_reply`, a falha sai no log e o túnel sobe com essas faixas.
+- Nenhuma faixa no fim, de nenhuma das duas fontes, também derruba o `connect`.
+
+| Situação | Razão no `disconnected` |
+|---|---|
+| `ClientSettings` falhou e o `hello_reply` não trouxe `range` | "Could not get the network ranges from the gateway: <motivo>" |
+| Nenhuma faixa no `hello_reply` nem no `ClientSettings` | "The gateway announced no network ranges for the tunnel" |
 
 ### Com o túnel de pé
 

@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, Notify};
 use crate::browser_login;
 use crate::engine::{self, Credentials, LoginError, Tuning, Tunnel, Waiting};
 use crate::http;
-use crate::net::{Packets, TunnelConfig};
+use crate::net::{Packets, Route, TunnelConfig};
 use crate::profile::{Auth, Profile};
 use crate::tls::GatewayTls;
 use crate::LogFn;
@@ -115,7 +115,7 @@ impl CheckPoint {
             ("type", Sexp::val(kind)),
             ("session_id", Sexp::val(session_id)),
         ];
-        if kind == "Signout" {
+        if matches!(kind, "Signout" | "ClientSettings") {
             header.push(("protocol_version", Sexp::val("100")));
         }
         let body = Sexp::obj("CCCclientRequest", vec![("RequestHeader", Sexp::obj("", header)), ("RequestData", data)]).encode();
@@ -226,6 +226,21 @@ fn extract_code(request_line: &str) -> Option<String> {
     valid.then(|| code.to_string())
 }
 
+/// Pedido `ClientSettings` das políticas atuais; a lista `range` vazia pede as faixas da rede.
+fn settings_request() -> Sexp {
+    Sexp::obj("ClientSettings", vec![("requested_policies_and_current_versions", Sexp::obj("", vec![("range", Sexp::val(""))]))])
+}
+
+/// Rotas de uma lista de faixas `from`/`to`, ignorando as ilegíveis.
+fn ranges(node: Option<&Sexp>) -> Vec<Route> {
+    node.map(Sexp::children)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|r| Some((r.text("from")?.parse().ok()?, r.text("to")?.parse().ok()?)))
+        .flat_map(|(from, to)| slim::range_to_routes(from, to))
+        .collect()
+}
+
 /// Servidores de uma lista de valores IPv4, ignorando o que não for endereço.
 fn addresses(node: Option<&Sexp>) -> Vec<Ipv4Addr> {
     node.map(Sexp::children).unwrap_or_default().iter().filter_map(|v| if let Sexp::Value(v) = v { v.parse().ok() } else { None }).collect()
@@ -300,7 +315,8 @@ impl engine::Engine for CheckPoint {
         }
     }
 
-    /// Abre o túnel SSL, apresenta a chave da sessão e lê a rede do `hello_reply`.
+    /// Abre o túnel SSL, apresenta a chave da sessão, lê a rede do `hello_reply` e pede as faixas
+    /// de rede com `ClientSettings`.
     async fn open_tunnel(&self, login_started: DateTime<Utc>) -> Result<(TunnelConfig, Packets, Tunnel), String> {
         let session = self.session.as_ref().ok_or("Not logged in")?;
         let mut stream = tokio::time::timeout(STEP_TIMEOUT, self.tls.connect()).await.map_err(|_| "Tunnel connection timed out".to_string())??;
@@ -316,15 +332,23 @@ impl engine::Engine for CheckPoint {
             other => return Err(format!("Unexpected tunnel answer {:?}", other)),
         }
         let ip: Ipv4Addr = reply.text("OM:ipaddr").and_then(|v| v.parse().ok()).ok_or("The gateway assigned no tunnel address")?;
-        // shortcut: sem `range` o túnel sobe sem rota (sem o pedido `ClientSettings`), confirmar no gateway real (#52).
-        let routes = reply
-            .get("range")
-            .map(Sexp::children)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|r| Some((r.text("from")?.parse().ok()?, r.text("to")?.parse().ok()?)))
-            .flat_map(|(from, to)| slim::range_to_routes(from, to))
-            .collect();
+        // O gateway de validação não manda `range` no `hello_reply`: as faixas vêm do `ClientSettings`.
+        // Se ele falhar sem `range` no hello, o túnel falha: sem rota ele pareceria conectado e não passaria nada.
+        let mut routes = ranges(reply.get("range"));
+        match self.request("ClientSettings", &session.id, settings_request()).await {
+            Ok(data) => {
+                for r in ranges(data.get("updated_policies:range:settings")) {
+                    if !routes.contains(&r) {
+                        routes.push(r);
+                    }
+                }
+            }
+            Err(e) if !routes.is_empty() => (self.log)(format!("using the hello_reply ranges only: {}", e)),
+            Err(e) => return Err(format!("Could not get the network ranges from the gateway: {}", e)),
+        }
+        if routes.is_empty() {
+            return Err("The gateway announced no network ranges for the tunnel".into());
+        }
         let auth_timeout = self.timeout_secs(&reply, "authentication", MAX_AUTH_TIMEOUT_SECS);
         let keepalive = self.timeout_secs(&reply, "keepalive", MAX_KEEPALIVE_SECS).map_or(DEFAULT_KEEPALIVE, Duration::from_secs);
         let keepalive = self.keepalive.unwrap_or(keepalive);

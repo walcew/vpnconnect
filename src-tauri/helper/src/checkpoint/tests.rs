@@ -104,6 +104,13 @@ async fn idp_login_connects_and_applies_the_gateway_network_without_leaking_secr
     calls.push(OsCall::SetDns { servers: DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec() });
     assert_eq!(os.calls(), calls);
 
+    // As faixas vêm do `ClientSettings` da sessão autenticada; a do próprio gateway é ignorada.
+    let settings = gw.requests().into_iter().find(|r| r.text("RequestHeader:type") == Some("ClientSettings")).expect("no ClientSettings request");
+    assert_eq!(settings.text("RequestHeader:session_id"), Some("5e55-0001"));
+    assert_eq!(settings.text("RequestHeader:protocol_version"), Some("100"));
+    assert_eq!(settings.get("RequestData").and_then(|d| d.name()), Some("ClientSettings"));
+    assert!(frames.iter().any(|f| f["line"] == "ignoring advertised route 127.0.0.1/255.255.255.255: it is the gateway's own address"), "no ignoring log");
+
     // O listener fecha depois do código.
     assert!(tokio::net::TcpStream::connect(("127.0.0.1", gw.login_port)).await.is_err());
 
@@ -146,6 +153,41 @@ async fn huge_gateway_timeouts_are_capped_and_the_tunnel_comes_up() {
     for name in ["authentication", "keepalive"] {
         assert!(frames.iter().any(|f| f["line"].as_str().is_some_and(|l| l.contains(name) && l.contains("capped"))), "no cap log for {}", name);
     }
+    assert_eq!(disconnect(&mut c).await["state"], "disconnected");
+}
+
+/// Rotas aplicadas, na ordem.
+fn added_routes(os: &FakeOs) -> Vec<Route> {
+    os.calls().into_iter().filter_map(|c| if let OsCall::AddRoute(r) = c { Some(r) } else { None }).collect()
+}
+
+#[tokio::test]
+async fn hello_reply_ranges_join_the_client_settings_ranges_without_duplicates() {
+    let _ports = SAML_PORTS.lock().await;
+    let (_gw, mut c, os, _, _) = connected(CheckpointOptions { hello_range: true, ..Default::default() }, Tuning::default(), |s| s).await;
+    assert_eq!(added_routes(&os), ROUTES.map(|(a, m)| route(a, m)));
+    assert_eq!(disconnect(&mut c).await["state"], "disconnected");
+}
+
+#[tokio::test]
+async fn refused_client_settings_without_hello_ranges_fails_the_connect_and_signs_out() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions { refuse_client_settings: true, ..Default::default() }).await;
+    let (mut c, os) = waiting(&gw, Tuning::default()).await;
+    assert!(browser(gw.login_port, &format!("GET /{}", IDP_CODE)).await.starts_with("HTTP/1.1 200 OK"));
+    let state = next_state(&mut c).await;
+    assert_eq!(state["state"], "disconnected", "{}", state);
+    assert!(state["reason"].as_str().unwrap().contains("Could not get the network ranges from the gateway"), "{}", state);
+    assert!(os.calls().is_empty(), "{:?}", os.calls());
+    assert_eq!(gw.logouts(), 1);
+}
+
+#[tokio::test]
+async fn refused_client_settings_with_hello_ranges_keeps_the_hello_routes() {
+    let _ports = SAML_PORTS.lock().await;
+    let options = CheckpointOptions { hello_range: true, refuse_client_settings: true, ..Default::default() };
+    let (_gw, mut c, os, _, _) = connected(options, Tuning::default(), |s| s).await;
+    assert_eq!(added_routes(&os), ROUTES.map(|(a, m)| route(a, m)));
     assert_eq!(disconnect(&mut c).await["state"], "disconnected");
 }
 
