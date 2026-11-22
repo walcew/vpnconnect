@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "OpenFortiVpn Connect",
+  "productName": "VPN Connect",
   "version": "0.5.0",
   "identifier": "com.openfortivpn-connect.desktop",
   "build": {
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "OPENFORTIVPN CONNECT",
+        "title": "VPN CONNECT",
         "hiddenTitle": true,
         "width": 400,
         "height": 560,
@@ -36,7 +36,7 @@
     "active": true,
     "targets": "all",
     "resources": {
-      "target/release/openvpngui-helper": "openvpngui-helper"
+      "target/release/vpnconnect-helper": "vpnconnect-helper"
     },
     "icon": [
       "icons/32x32.png",

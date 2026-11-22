@@ -1,12 +1,12 @@
 {
-  "name": "openvpngui",
+  "name": "vpnconnect",
   "version": "0.5.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:helper": "cd src-tauri && cargo build --release -p openvpngui-helper",
+    "build:helper": "cd src-tauri && cargo build --release -p vpnconnect-helper",
     "prebuild": "npm run build:helper",
     "preview": "vite preview",
     "tauri": "tauri"

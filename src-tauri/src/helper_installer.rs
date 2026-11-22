@@ -180,7 +180,7 @@ fn osascript_error(stderr: &str, cancelled: &str, failed: &str) -> AdminError {
 
 /// Instala o Helper com osascript (uma senha de admin) a partir dos `resource_dir` do bundle do app.
 pub fn install(resource_dir: &Path) -> Result<(), AdminError> {
-    let bundled_helper = resource_dir.join("openvpngui-helper");
+    let bundled_helper = resource_dir.join("vpnconnect-helper");
 
     if !bundled_helper.exists() {
         return Err(AdminError::Failed(format!(
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn bundle_paths_survive_both_escape_layers() {
         for path in [
-            "/Applications/OpenFortiVpn Connect.app/x",
+            "/Applications/VPN Connect.app/x",
             "/tmp/it's/x",
             "/tmp/say \"hi\"/x",
             "/tmp/back\\slash/x",
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn install_is_one_admin_script_that_removes_the_old_helper_before_the_new_one_loads() {
-        let cmd = install_cmd("/Applications/App.app/Contents/Resources/openvpngui-helper");
+        let cmd = install_cmd("/Applications/App.app/Contents/Resources/vpnconnect-helper");
         let at = |needle: &str| cmd.find(needle).unwrap_or_else(|| panic!("missing {needle} in {cmd}"));
         let kill_openfortivpn = at("pkill -x openfortivpn");
         let kill_pppd = at("killall -KILL pppd");
@@ -335,7 +335,7 @@ mod tests {
         let old_remove = at("launchctl remove com.openvpngui.helper");
         let old_dns = at("remove State:/Network/Service/OpenFortiVPN/DNS");
         let old_files = at("rm -f /Library/PrivilegedHelperTools/com.openvpngui.helper /Library/PrivilegedHelperTools/openfortivpn /var/run/openvpngui-helper.sock");
-        let new_copy = at("cp '/Applications/App.app/Contents/Resources/openvpngui-helper' /Library/PrivilegedHelperTools/com.vpnconnect.helper");
+        let new_copy = at("cp '/Applications/App.app/Contents/Resources/vpnconnect-helper' /Library/PrivilegedHelperTools/com.vpnconnect.helper");
         let new_load = at("launchctl load -w /Library/LaunchDaemons/com.vpnconnect.helper.plist");
         assert!(kill_openfortivpn < kill_pppd && kill_pppd < down_ppp && down_ppp < old_unload);
         assert!(old_unload < old_remove && old_remove < old_dns && old_dns < old_files);

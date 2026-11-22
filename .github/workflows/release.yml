@@ -63,16 +63,16 @@ jobs:
       - name: Build helper binary
         run: |
           cd src-tauri
-          cargo build --release --target ${{ matrix.target }} -p openvpngui-helper
+          cargo build --release --target ${{ matrix.target }} -p vpnconnect-helper
           mkdir -p target/release
-          cp target/${{ matrix.target }}/release/openvpngui-helper target/release/openvpngui-helper
+          cp target/${{ matrix.target }}/release/vpnconnect-helper target/release/vpnconnect-helper
 
       - name: Build and release with Tauri
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # O prebuild roda `cargo build --release` sem --target; sem isto ele compila o helper para o
-          # host (arm64) e sobrescreve o target/release/openvpngui-helper copiado no passo anterior.
+          # host (arm64) e sobrescreve o target/release/vpnconnect-helper copiado no passo anterior.
           CARGO_BUILD_TARGET: ${{ matrix.target }}
           # Code signing (uncomment when ready):
           # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -84,8 +84,8 @@ jobs:
         with:
           # Sem tagName o tauri-action só compila, sem criar release (dry_run).
           tagName: ${{ inputs.dry_run != true && 'v__VERSION__' || '' }}
-          releaseName: ${{ inputs.dry_run != true && 'OpenFortiVpn Connect v__VERSION__' || '' }}
-          releaseBody: 'See the assets to download and install this version.'
+          releaseName: ${{ inputs.dry_run != true && 'VPN Connect v__VERSION__' || '' }}
+          releaseBody: 'See the assets to download and install this version. Installed from the DMG before 0.6.0? Delete the old "OpenFortiVpn Connect.app" from /Applications.'
           releaseDraft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft == 'true' }}
           prerelease: false
           args: '--target ${{ matrix.target }}'
@@ -93,7 +93,7 @@ jobs:
       # Depois do Tauri: o prebuild dele pode sobrescrever o helper com o do host.
       - name: Verify bundled Helper architecture
         run: |
-          lipo src-tauri/target/release/openvpngui-helper -verify_arch ${{ matrix.lipo_arch }}
+          lipo src-tauri/target/release/vpnconnect-helper -verify_arch ${{ matrix.lipo_arch }}
 
       - name: Upload DMGs (dry run)
         if: inputs.dry_run == true
@@ -167,9 +167,9 @@ jobs:
             -d "{
               \"event_type\": \"update-cask\",
               \"client_payload\": {
-                \"cask\": \"openfortivpn-connect\",
+                \"cask\": \"vpnconnect\",
                 \"version\": \"$VERSION\",
-                \"repo\": \"walcew/openfortivpn-connect\",
-                \"asset_pattern\": \"OpenFortiVpn.Connect_{version}_{arch}.dmg\"
+                \"repo\": \"walcew/vpnconnect\",
+                \"asset_pattern\": \"VPN.Connect_{version}_{arch}.dmg\"
               }
             }"

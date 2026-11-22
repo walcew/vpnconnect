@@ -8,7 +8,7 @@ interface Props {
 export function About({ onBack }: Props) {
   const appVersion = useAppVersion();
   const handleOpenGithub = async () => {
-    await openUrl("https://github.com/walcew/openfortivpn-connect");
+    await openUrl("https://github.com/walcew/vpnconnect");
   };
 
   return (
@@ -41,7 +41,7 @@ export function About({ onBack }: Props) {
         </div>
 
         <div>
-          <h3 className="text-lg font-semibold text-white">OpenFortiVpn Connect</h3>
+          <h3 className="text-lg font-semibold text-white">VPN Connect</h3>
           {appVersion && <p className="text-xs text-white/40 mt-1">Version {appVersion}</p>}
         </div>
 

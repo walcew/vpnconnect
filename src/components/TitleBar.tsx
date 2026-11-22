@@ -21,7 +21,7 @@ export function TitleBar() {
       {/* Centered title - pointer-events-none so drag works through it */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
         <span className="text-[11px] font-semibold text-white/60 tracking-wider">
-          OPENFORTIVPN CONNECT
+          VPN CONNECT
         </span>
       </div>
     </div>

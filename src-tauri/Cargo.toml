@@ -2,12 +2,12 @@
 members = [".", "helper"]
 
 [package]
-name = "openvpngui"
+name = "vpnconnect"
 version = "0.5.0"
-description = "OpenFortiVpn Connect - A macOS VPN client"
+description = "VPN Connect - A macOS VPN client"
 authors = ["you"]
 license = "MIT"
-repository = "https://github.com/walcew/openfortivpn-connect"
+repository = "https://github.com/walcew/vpnconnect"
 edition = "2021"
 rust-version = "1.77.2"
 
