@@ -1,8 +1,9 @@
-//! Apoio aos testes no seam da sessão: cliente do socket, fake da camada de SO e
-//! gateway Fortinet falso.
+//! Apoio aos testes no seam da sessão: cliente do socket, fake da camada de SO, apoio comum
+//! dos gateways falsos (TLS e HTTP) e gateway Fortinet falso.
 
 pub mod fake_gateway;
 pub mod fake_os;
+pub mod fake_server;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};

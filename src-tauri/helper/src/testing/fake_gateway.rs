@@ -9,17 +9,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Notify};
-use tokio_rustls::rustls::crypto::ring;
-use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose, SanType};
-use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use tokio_rustls::rustls::server::{ClientHello, ResolvesServerCert};
-use tokio_rustls::rustls::sign::CertifiedKey;
-use tokio_rustls::rustls::{RootCertStore, ServerConfig};
-use tokio_rustls::TlsAcceptor;
+use tokio_rustls::rustls::RootCertStore;
+
+use super::fake_server::{read_request, CertOptions, TlsServer};
 
 pub const PROFILE_ID: &str = "8d3c1f5e-0000-4000-8000-000000000001";
 pub const USERNAME: &str = "alice";
@@ -112,7 +107,7 @@ pub struct FakeGateway {
     pub sso_port: u16,
     /// sha256 hex do DER do certificado, como em `trusted_certs`.
     pub digest: String,
-    ca: Option<CertificateDer<'static>>,
+    tls: TlsServer,
     shared: Arc<Shared>,
     from_client: tokio::sync::Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
     to_client: mpsc::UnboundedSender<Vec<u8>>,
@@ -120,35 +115,9 @@ pub struct FakeGateway {
 
 impl FakeGateway {
     pub async fn start(options: GatewayOptions) -> Self {
-        let (der, key_pair, ca) = if options.ca_signed {
-            let ca_key = KeyPair::generate().unwrap();
-            let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
-            ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-            ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
-            let ca_cert = ca_params.self_signed(&ca_key).unwrap();
-            let mut params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-            params.subject_alt_names.push(SanType::IpAddress("127.0.0.1".parse().unwrap()));
-            if options.wrong_name {
-                params.subject_alt_names = vec![SanType::DnsName("other.example".try_into().unwrap())];
-            }
-            let key_pair = KeyPair::generate().unwrap();
-            let cert = params.signed_by(&key_pair, &ca_cert, &ca_key).unwrap();
-            (cert.der().clone(), key_pair, Some(ca_cert.der().clone()))
-        } else {
-            let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
-            (cert.cert.der().clone(), cert.key_pair, None)
-        };
-        let digest = Sha256::digest(der.as_ref()).iter().map(|b| format!("{:02x}", b)).collect();
-        let key_pair = if options.mismatched_key { KeyPair::generate().unwrap() } else { key_pair };
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key_pair.serialize_der()));
-        // O resolvedor não confere se a chave é a do certificado, ao contrário do `with_single_cert`.
-        let signing_key = ring::sign::any_supported_type(&key).unwrap();
-        let config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .unwrap()
-            .with_no_client_auth()
-            .with_cert_resolver(Arc::new(FixedCert(Arc::new(CertifiedKey::new(vec![der], signing_key)))));
-        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let tls = TlsServer::new(CertOptions { ca_signed: options.ca_signed, wrong_name: options.wrong_name, mismatched_key: options.mismatched_key });
+        let digest = tls.digest.clone();
+        let acceptor = tls.acceptor.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let sso_port = free_sso_port();
@@ -180,7 +149,7 @@ impl FakeGateway {
                 });
             }
         });
-        Self { port, sso_port, digest, ca, shared, from_client: tokio::sync::Mutex::new(from_rx), to_client: to_tx }
+        Self { port, sso_port, digest, tls, shared, from_client: tokio::sync::Mutex::new(from_rx), to_client: to_tx }
     }
 
     /// O Profile do comando `connect` apontando para este gateway.
@@ -198,11 +167,7 @@ impl FakeGateway {
 
     /// Raízes de teste que confiam na CA deste gateway (vazias se o certificado é autoassinado).
     pub fn roots(&self) -> RootCertStore {
-        let mut roots = RootCertStore::empty();
-        if let Some(ca) = &self.ca {
-            roots.add(ca.clone()).unwrap();
-        }
-        roots
+        self.tls.roots()
     }
 
     pub fn logouts(&self) -> usize {
@@ -263,24 +228,11 @@ fn free_sso_port() -> u16 {
         .expect("no free port in 20000-29999")
 }
 
-#[derive(Debug)]
-struct FixedCert(Arc<CertifiedKey>);
-
-impl ResolvesServerCert for FixedCert {
-    fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        Some(self.0.clone())
-    }
-}
-
 async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: S, shared: Arc<Shared>) {
-    let Some((head, body)) = read_request(&mut stream).await else { return };
-    let request_line = head.lines().next().unwrap_or_default().to_string();
-    let header = |name: &str| {
-        head.lines()
-            .filter_map(|l| l.split_once(':'))
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.trim().to_string())
-    };
+    let Some(request) = read_request(&mut stream).await else { return };
+    let body = &request.body;
+    let request_line = format!("{} {} ", request.method, request.path);
+    let header = |name: &str| request.header(name).map(str::to_string);
     // Como o gateway do CNJ: sem `User-Agent` ele fecha a conexão sem responder (o túnel não precisa).
     if header("user-agent").is_none() && !request_line.starts_with("GET /remote/sslvpn-tunnel ") {
         return;
@@ -288,7 +240,7 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
     let has_cookie = header("cookie").as_deref() == Some(&format!("SVPNCOOKIE={}", COOKIE));
 
     let response = if request_line.starts_with("POST /remote/logincheck ") {
-        let form = parse_form(&body);
+        let form = parse_form(body);
         let field = |name: &str| form.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         let granted = http(&format!("Set-Cookie: SVPNCOOKIE={}; path=/; secure; httponly\r\n", COOKIE), "ret=1,redir=/remote/fortisslvpn_xml");
         let denied = http("Set-Cookie: SVPNCOOKIE=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT\r\n", "ret=0,redir=/remote/login?&err=sslvpn_login_permission_denied");
@@ -401,27 +353,6 @@ fn xml(options: &GatewayOptions) -> String {
          <idle-timeout val='3600'/><auth-timeout val='{}'/></sslvpn-tunnel>",
         dns, DNS_SUFFIXES.join(";"), split, options.auth_timeout.unwrap_or(AUTH_TIMEOUT)
     )
-}
-
-async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Option<(String, Vec<u8>)> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-    while !buf.ends_with(b"\r\n\r\n") {
-        if stream.read(&mut byte).await.ok()? == 0 {
-            return None;
-        }
-        buf.push(byte[0]);
-    }
-    let head = String::from_utf8(buf).ok()?;
-    let len = head
-        .lines()
-        .filter_map(|l| l.split_once(':'))
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, v)| v.trim().parse().ok())
-        .unwrap_or(0);
-    let mut body = vec![0u8; len];
-    stream.read_exact(&mut body).await.ok()?;
-    Some((head, body))
 }
 
 fn parse_form(body: &[u8]) -> Vec<(String, String)> {
