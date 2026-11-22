@@ -47,6 +47,10 @@ pub struct CheckpointOptions {
     pub mute_logout: bool,
     /// O `hello_reply` anuncia `timeouts` enormes, no limite do u64.
     pub huge_timeouts: bool,
+    /// Opções de login como (id, factor_type), no lugar da única opção de IdP `LOGIN_OPTION`.
+    pub login_options: Option<Vec<(&'static str, &'static str)>>,
+    /// As informações do servidor não oferecem o túnel `SSL`.
+    pub no_ssl: bool,
 }
 
 struct Shared {
@@ -152,7 +156,7 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
     shared.requests.lock().unwrap().push(body.clone());
     let kind = body.text("RequestHeader:type").unwrap_or_default().to_string();
     let reply = match kind.as_str() {
-        "ClientHello" => server_info(),
+        "ClientHello" => server_info(&shared.options),
         "UserPass" if body.text("RequestData:selectedLoginOption") == Some(LOGIN_OPTION) => response(
             "UserPass",
             "",
@@ -198,20 +202,31 @@ fn response(kind: &str, session_id: &str, data: &str) -> String {
     )
 }
 
-fn server_info() -> String {
+fn server_info(options: &CheckpointOptions) -> String {
+    let login_options = options.login_options.clone().unwrap_or_else(|| vec![(LOGIN_OPTION, "identity_provider")]);
+    let list: String = login_options
+        .iter()
+        .enumerate()
+        .map(|(i, (id, factor))| {
+            format!(
+                "\n\t\t\t\t:{} (\n\t\t\t\t\t:id ({})\n\t\t\t\t\t:display_name (\"{}\")\n\t\t\t\t\t:show_realm (1)\n\
+                 \t\t\t\t\t:factors (\n\t\t\t\t\t\t:0 (\n\t\t\t\t\t\t\t:factor_type ({}))))",
+                i, id, id, factor
+            )
+        })
+        .collect();
+    let protocols = if options.no_ssl { "\n\t\t\t\t: (IPSec)\n\t\t\t\t: (L2TP)" } else { "\n\t\t\t\t: (IPSec)\n\t\t\t\t: (SSL)\n\t\t\t\t: (L2TP)" };
     response(
         "ClientHello",
         "",
         &format!(
             "\t\t:protocol_version (\n\t\t\t:protocol_version (100))\n\
              \t\t:connectivity_info (\n\t\t\t:client_enabled (true)\n\
-             \t\t\t:supported_data_tunnel_protocols (\n\t\t\t\t: (IPSec)\n\t\t\t\t: (SSL)\n\t\t\t\t: (L2TP))\n\
+             \t\t\t:supported_data_tunnel_protocols ({})\n\
              \t\t\t:tcpt_port (443)\n\t\t\t:natt_port (4500))\n\
-             \t\t:login_options_data (\n\t\t\t:login_options_list (\n\
-             \t\t\t\t:0 (\n\t\t\t\t\t:id ({})\n\t\t\t\t\t:display_name (\"Corp SSO\")\n\t\t\t\t\t:show_realm (1)\n\
-             \t\t\t\t\t:factors (\n\t\t\t\t\t\t:0 (\n\t\t\t\t\t\t\t:factor_type (identity_provider)))))\n\
+             \t\t:login_options_data (\n\t\t\t:login_options_list ({})\n\
              \t\t\t:login_options_md5 (00112233445566778899aabbccddeeff))",
-            LOGIN_OPTION
+            protocols, list
         ),
     )
 }

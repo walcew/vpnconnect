@@ -73,11 +73,30 @@ Os pedidos levam `client_type (TRAC)`, a família de cliente que o gateway esper
 1. **Informações do servidor**: pedido `ClientHello` com `:RequestData (:client_info (:client_type (TRAC) :client_version (1) :client_support_saml (true)))`. A resposta traz `connectivity_info:supported_data_tunnel_protocols`, uma lista com valores como `IPSec`, `SSL` e `L2TP`, e `login_options_data:login_options_list`, com as opções de login: cada uma tem `id`, `display_name` e `factors`, cujos `factor_type` dizem o tipo (`password`, `certificate`, `identity_provider`...). Sem `SSL` na lista, o login falha com "The gateway does not offer the SSL tunnel".
 2. **Opção de login**: com o `realm` do Profile preenchido, a opção com esse `id`, que precisa ter um fator `identity_provider`; vazio, a única opção com esse fator. Sem nenhuma, com várias (a mensagem lista os ids) ou com a opção do Profile inexistente ou de outro tipo, o login falha. O `realm` só aceita até 64 caracteres entre letras, dígitos, `_`, `-` e `.`, conferidos antes de qualquer login (`Invalid login option`), e o Profile precisa ter `auth: "saml"`.
 3. **Início da autenticação**: pedido `UserPass` com `client_type`, `username` e `password` vazios (ofuscados), o `client_logging_data` e `selectedLoginOption (<id>)`. A resposta traz `authn_status (continue)`, o `session_id` da autenticação e o `prompt` ofuscado, que desofuscado é a URL do IdP (**ref**). O Engine só aceita uma URL `https://`.
-4. **Espera no navegador**: o Helper escuta em `127.0.0.1:7779`, a porta fixa para onde o portal do gateway manda o navegador no fim do login (**ref**), e só então emite `waiting-saml` com a URL do passo 3. Porta ocupada vira `disconnected` com "Local SSO port 7779 is already in use". A espera dura 120 s, o prazo do snx-rs.
+4. **Espera no navegador**: o Helper escuta em `127.0.0.1:7779`, a porta fixa para onde o portal do gateway manda o navegador no fim do login (**ref**), e só então emite `waiting-saml` com a URL do passo 3. Porta ocupada vira `disconnected` com "Local SSO port 7779 is already in use", que cita quem costuma ocupá-la (o Check Point Endpoint Security ou o snx-rs). A espera dura 120 s, o prazo do snx-rs.
 5. **Código**: o navegador chega com `GET /<código>`. O listener é o mesmo do SAML do Fortinet (`browser_login.rs`: limite de tamanho e de conexões, 400 para qualquer outro pedido e o login continua). Vale só `GET` com um código de 1 a 1024 caracteres entre letras, dígitos e `-_.~%=+` (**inf**: o formato real do código não foi visto; o snx-rs aceita também `OPTIONS`).
 6. **Resposta do desafio**: pedido `MultiChallange` (a grafia é a do protocolo), com o `session_id` da autenticação no cabeçalho e `:RequestData (:client_type (TRAC) :auth_session_id (<sessão>) :user_input (<código ofuscado>))`. A resposta de sucesso traz `authn_status (done)`, `is_authenticated (true)`, `active_key` (a chave da sessão, ofuscada), o `session_id` da sessão e `active_key_timeout`. Sem `is_authenticated (true)`, é recusa do gateway (`cause: login-failed`), com o `error_message` desofuscado quando vier, sem caracteres de controle e cortado em 200 caracteres.
 
 A chave da sessão e o código do IdP ficam no Helper: não vão em evento, log nem resposta.
+
+### Respostas de erro
+
+Só a recusa do gateway no passo 6 leva `cause: login-failed`; as outras falhas terminam em `disconnected` com a razão e sem `cause`. As do Profile são recusadas na resposta do `connect`, antes de qualquer contato com o gateway.
+
+| Situação | Onde | Razão |
+|---|---|---|
+| `auth` diferente de `saml` | resposta do `connect` | "Check Point profiles sign in only through the identity provider (auth saml)" |
+| `realm` fora do formato | resposta do `connect` | "Invalid login option" |
+| Sem `SSL` em `supported_data_tunnel_protocols` | `disconnected` | "The gateway does not offer the SSL tunnel" |
+| `realm` sem opção com esse `id` | `disconnected` | "The gateway has no login option <id>; available: <ids>" |
+| `realm` de opção sem fator `identity_provider` | `disconnected` | "Login option <id> is not an identity provider login" |
+| `realm` vazio e nenhuma opção de IdP | `disconnected` | "The gateway offers no identity provider login" |
+| `realm` vazio e várias opções de IdP | `disconnected` | "The gateway offers several identity provider logins; set the login option to one of: <ids>" |
+| Porta do listener ocupada | `disconnected` | "Local SSO port <porta> is already in use; close the app using it (e.g. Check Point Endpoint Security or snx-rs) and try again" |
+| Sem código em 120 s | `disconnected` | "Identity provider login timed out after 120 s" |
+| Desafio que não é do IdP, sem chave da sessão ou outro passo depois do código | `disconnected` | mensagem do passo |
+| Recusa no `MultiChallange` | `disconnected`, `cause: login-failed` | "Login failed: <error_message>" |
+| HTTP diferente de 200 ou `return_code` diferente de 600 | `disconnected` | "Gateway refused the request <tipo> (HTTP <n>)" ou "... with return code <n>" |
 
 ## Túnel
 

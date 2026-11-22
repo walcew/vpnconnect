@@ -72,6 +72,7 @@ pub struct CheckPoint {
     login_option: String,
     tls: Arc<GatewayTls>,
     login_port: u16,
+    login_timeout: Duration,
     keepalive: Option<Duration>,
     next_id: AtomicU32,
     session: Option<GatewaySession>,
@@ -93,6 +94,7 @@ impl CheckPoint {
             login_option,
             tls,
             login_port: tuning.login_port.unwrap_or(LOGIN_PORT),
+            login_timeout: tuning.login_timeout.unwrap_or(LOGIN_TIMEOUT),
             keepalive: tuning.keepalive,
             next_id: AtomicU32::new(1),
             session: None,
@@ -274,9 +276,9 @@ impl engine::Engine for CheckPoint {
 
         let listener = browser_login::listen(self.login_port, "Check Point Endpoint Security or snx-rs").await.map_err(Failed)?;
         waiting(Waiting::Browser(url));
-        let code = tokio::time::timeout(LOGIN_TIMEOUT, browser_login::wait_for(listener, extract_code))
+        let code = tokio::time::timeout(self.login_timeout, browser_login::wait_for(listener, extract_code))
             .await
-            .map_err(|_| Failed(format!("Identity provider login timed out after {} s", LOGIN_TIMEOUT.as_secs())))?
+            .map_err(|_| Failed(format!("Identity provider login timed out after {} s", self.login_timeout.as_secs_f32())))?
             .map_err(Failed)?;
 
         let answer = Sexp::obj(

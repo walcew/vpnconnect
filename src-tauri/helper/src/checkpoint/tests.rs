@@ -18,8 +18,13 @@ use crate::testing::{allow_all, client, disconnect, start_session, Client, SAML_
 
 /// Sessão com o listener de login na porta do gateway falso; `bandwidth` encurta o intervalo da banda.
 async fn start(gw: &FakeCheckpoint, bandwidth: Option<Duration>) -> (PathBuf, Arc<FakeOs>) {
+    start_tuned(gw, bandwidth, Tuning::default()).await
+}
+
+/// `start` com prazos encurtados; a porta do listener é sempre a do gateway falso.
+async fn start_tuned(gw: &FakeCheckpoint, bandwidth: Option<Duration>, tuning: Tuning) -> (PathBuf, Arc<FakeOs>) {
     let os = Arc::new(FakeOs::default());
-    let mut session = Session::new(os.clone()).with_tuning(Tuning { login_port: Some(gw.login_port), ..Default::default() });
+    let mut session = Session::new(os.clone()).with_tuning(Tuning { login_port: Some(gw.login_port), ..tuning });
     if let Some(interval) = bandwidth {
         session = session.with_bandwidth_interval(interval);
     }
@@ -309,5 +314,228 @@ async fn checkpoint_profile_with_password_auth_is_refused_before_any_login() {
     let error = refused(&mut c, connect_cmd(profile)).await;
     assert!(error.contains("saml"), "{}", error);
     assert!(gw.requests().is_empty());
+    assert!(os.calls().is_empty());
+}
+
+// ---- Recusas do login e listener ----
+
+/// Manda o `connect` e devolve o primeiro estado que não seja `connecting`.
+async fn next_state_after_connect(c: &mut Client, profile: Value) -> Value {
+    c.send(connect_cmd(profile)).await;
+    loop {
+        let v = c.recv_skipping_logs().await;
+        if v["event"] == "state" && v["state"] != "connecting" {
+            return v;
+        }
+    }
+}
+
+/// Próximo estado depois do `waiting-saml`.
+async fn next_state(c: &mut Client) -> Value {
+    loop {
+        let v = c.recv_skipping_logs().await;
+        if v["event"] == "state" {
+            return v;
+        }
+    }
+}
+
+/// Falha do login com razão e sem `cause`, antes do início da autenticação (logo sem listener).
+async fn login_fails_before_the_listener(options: CheckpointOptions, realm: Option<&str>) -> String {
+    let gw = FakeCheckpoint::start(options).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let mut profile = gw.profile();
+    if let Some(realm) = realm {
+        profile["realm"] = json!(realm);
+    }
+    let state = next_state_after_connect(&mut c, profile).await;
+    assert_eq!(state["state"], "disconnected", "{}", state);
+    assert!(state.get("cause").is_none(), "{}", state);
+    assert!(gw.requests().iter().all(|r| r.text("RequestHeader:type") == Some("ClientHello")), "the login started");
+    assert!(os.calls().is_empty());
+    state["reason"].as_str().unwrap().to_string()
+}
+
+fn several_idp() -> CheckpointOptions {
+    CheckpointOptions { login_options: Some(vec![("vpn_Other_SSO", "identity_provider"), ("vpn_Pass", "password"), (LOGIN_OPTION, "identity_provider")]), ..Default::default() }
+}
+
+#[tokio::test]
+async fn realm_picks_the_login_option_among_several() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(several_idp()).await;
+    let (path, _os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let mut profile = gw.profile();
+    profile["realm"] = json!(LOGIN_OPTION);
+    idp_connect(&mut c, &gw, profile).await;
+    let login = gw.requests().into_iter().find(|r| r.text("RequestHeader:type") == Some("UserPass")).expect("no login request");
+    assert_eq!(login.text("RequestData:selectedLoginOption"), Some(LOGIN_OPTION));
+}
+
+#[tokio::test]
+async fn several_idp_options_without_realm_list_the_ids() {
+    let reason = login_fails_before_the_listener(several_idp(), None).await;
+    assert!(reason.contains("several identity provider logins") && reason.contains(&format!("vpn_Other_SSO, {}", LOGIN_OPTION)), "{}", reason);
+    assert!(!reason.contains("vpn_Pass"), "{}", reason);
+}
+
+#[tokio::test]
+async fn unknown_login_option_fails_with_the_available_ids() {
+    let reason = login_fails_before_the_listener(several_idp(), Some("vpn_Missing")).await;
+    assert!(reason.contains("no login option vpn_Missing") && reason.contains("vpn_Pass"), "{}", reason);
+}
+
+#[tokio::test]
+async fn login_option_of_another_type_fails() {
+    let reason = login_fails_before_the_listener(several_idp(), Some("vpn_Pass")).await;
+    assert!(reason.contains("vpn_Pass is not an identity provider login"), "{}", reason);
+}
+
+#[tokio::test]
+async fn gateway_without_idp_options_fails() {
+    let options = CheckpointOptions { login_options: Some(vec![("vpn_Pass", "password")]), ..Default::default() };
+    let reason = login_fails_before_the_listener(options, None).await;
+    assert!(reason.contains("offers no identity provider login"), "{}", reason);
+}
+
+#[tokio::test]
+async fn gateway_without_the_ssl_tunnel_fails() {
+    let reason = login_fails_before_the_listener(CheckpointOptions { no_ssl: true, ..Default::default() }, None).await;
+    assert!(reason.contains("does not offer the SSL tunnel"), "{}", reason);
+}
+
+#[tokio::test]
+async fn invalid_login_option_in_the_profile_is_refused_before_any_login() {
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    for realm in ["vpn sso".to_string(), "x".repeat(65)] {
+        let mut profile = gw.profile();
+        profile["realm"] = json!(realm);
+        let error = refused(&mut c, connect_cmd(profile)).await;
+        assert!(error.contains("Invalid login option"), "{}", error);
+    }
+    assert!(gw.requests().is_empty());
+    assert!(os.calls().is_empty());
+}
+
+/// Conecta até o `waiting-saml`, com o listener de pé.
+async fn waiting(gw: &FakeCheckpoint, tuning: Tuning) -> (Client, Arc<FakeOs>) {
+    let (path, os) = start_tuned(gw, None, tuning).await;
+    let mut c = client(&path).await;
+    let state = next_state_after_connect(&mut c, gw.profile()).await;
+    assert_eq!(state["state"], "waiting-saml", "{}", state);
+    (c, os)
+}
+
+/// Manda `<linha> HTTP/1.1` ao listener e devolve a resposta, vazia se ele fechar sem responder.
+async fn local_request(port: u16, line: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let _ = s.write_all(format!("{} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", line, port).as_bytes()).await;
+    let mut resp = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut resp)).await.unwrap();
+    String::from_utf8_lossy(&resp).into_owned()
+}
+
+#[tokio::test]
+async fn code_refused_by_the_gateway_is_login_failed() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (mut c, os) = waiting(&gw, Tuning::default()).await;
+    assert!(browser(gw.login_port, "GET /wrong-code").await.starts_with("HTTP/1.1 200 OK"));
+    let state = next_state(&mut c).await;
+    assert_eq!(state["state"], "disconnected");
+    assert!(state["reason"].as_str().unwrap().contains("Authentication failed"), "{}", state);
+    assert_eq!(state["cause"], "login-failed", "{}", state);
+    assert!(os.calls().is_empty());
+}
+
+#[tokio::test]
+async fn invalid_requests_get_400_and_the_login_goes_on() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (mut c, _os) = waiting(&gw, Tuning::default()).await;
+    for line in [
+        "GET /abc;rm%20-rf".to_string(),
+        format!("GET /{}", "a".repeat(1025)),
+        format!("GET /{}", "a".repeat(9000)),
+        format!("POST /{}", IDP_CODE),
+        "GET /".to_string(),
+    ] {
+        let resp = local_request(gw.login_port, &line).await;
+        // Acima do teto do cabeçalho o listener fecha sem resposta.
+        assert!(resp.starts_with("HTTP/1.1 400") || (line.len() > 8192 && resp.is_empty()), "{}: {}", &line[..20.min(line.len())], resp);
+    }
+    assert!(browser(gw.login_port, &format!("GET /{}", IDP_CODE)).await.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(next_state(&mut c).await["state"], "connected");
+}
+
+#[tokio::test]
+async fn listener_connections_above_the_limit_are_closed() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (mut c, _os) = waiting(&gw, Tuning::default()).await;
+    let mut idle = Vec::new();
+    for _ in 0..16 {
+        idle.push(tokio::net::TcpStream::connect(("127.0.0.1", gw.login_port)).await.unwrap());
+    }
+    assert_eq!(local_request(gw.login_port, &format!("GET /{}", IDP_CODE)).await, "");
+    drop(idle);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(browser(gw.login_port, &format!("GET /{}", IDP_CODE)).await.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(next_state(&mut c).await["state"], "connected");
+}
+
+#[tokio::test]
+async fn idp_login_times_out_with_a_clear_reason() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (mut c, os) = waiting(&gw, Tuning { login_timeout: Some(Duration::from_millis(300)), ..Default::default() }).await;
+    let state = next_state(&mut c).await;
+    assert_eq!(state["state"], "disconnected");
+    assert!(state["reason"].as_str().unwrap().contains("Identity provider login timed out after 0.3 s"), "{}", state);
+    assert!(state.get("cause").is_none(), "{}", state);
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", gw.login_port)).await.is_err());
+    assert!(os.calls().is_empty());
+}
+
+#[tokio::test]
+async fn disconnect_while_waiting_for_the_idp_closes_the_listener() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (mut c, os) = waiting(&gw, Tuning::default()).await;
+    let state = disconnect(&mut c).await;
+    assert!(state.get("reason").is_none(), "{}", state);
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", gw.login_port)).await.is_err());
+    assert!(os.calls().is_empty());
+}
+
+#[tokio::test]
+async fn cancel_while_waiting_for_the_idp_closes_the_listener() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (mut c, os) = waiting(&gw, Tuning::default()).await;
+    c.send(json!({"v": 2, "cmd": "cancel"})).await;
+    assert_eq!(c.recv_skipping_logs().await["ok"], true);
+    assert_eq!(next_state(&mut c).await, json!({"v": 2, "type": "event", "event": "state", "state": "disconnected"}));
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", gw.login_port)).await.is_err());
+    assert!(os.calls().is_empty());
+}
+
+#[tokio::test]
+async fn busy_login_port_disconnects_naming_the_port_and_its_usual_holder() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let _busy = std::net::TcpListener::bind(("127.0.0.1", gw.login_port)).unwrap();
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let state = next_state_after_connect(&mut c, gw.profile()).await;
+    assert_eq!(state["state"], "disconnected");
+    let reason = state["reason"].as_str().unwrap();
+    assert!(reason.contains(&format!("port {} is already in use", gw.login_port)) && reason.contains("Check Point Endpoint Security"), "{}", reason);
+    assert!(state.get("cause").is_none(), "{}", state);
     assert!(os.calls().is_empty());
 }

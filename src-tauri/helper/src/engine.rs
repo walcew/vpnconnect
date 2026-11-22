@@ -46,6 +46,8 @@ pub struct Tuning {
     pub push_timeout: Option<Duration>,
     /// Porta do listener do login pelo IdP do Check Point (7779 na produção).
     pub login_port: Option<u16>,
+    /// Espera pelo login no navegador do Check Point (120 s na produção).
+    pub login_timeout: Option<Duration>,
 }
 
 /// Um protocolo de VPN, conduzido pela sessão numa ordem fixa: `login`, `open_tunnel` e,
