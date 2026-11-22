@@ -1,6 +1,6 @@
 # CLI como modo do executável do app
 
-**Status:** aceito, desde a CLI `vpnconnect` (spec #33).
+**Status:** aceito, desde a CLI `vpnconnect` (spec #33). Revisado na 0.6.0, quando o produto passou a se chamar "VPN Connect" (#42).
 
 A CLI `vpnconnect` precisa ler as senhas dos Profiles no login keychain sem o diálogo de permissão do macOS. Os itens (service `com.openvpngui.app`, account `vpn-<id>`) ficam com a ACL do binário que os gravou, e o app é assinado ad-hoc. Para o macOS, um binário separado seria outro programa, e a assinatura ad-hoc muda a cada build. Ele cairia no diálogo a cada versão, e um agente ou script travaria esperando um clique. Decidimos que a **CLI é um modo do próprio executável do app** (`Contents/MacOS/vpnconnect`).
 
@@ -18,7 +18,8 @@ A CLI `vpnconnect` precisa ler as senhas dos Profiles no login keychain sem o di
 
 ## Consequences
 
-- **Efeito colateral no macOS verificado: nenhum.** Rodar o executável de dentro do `.app` pelo terminal (`.../Contents/MacOS/openvpngui status`, então com o nome antigo, build de debug assinado ad-hoc, macOS 27.2) não registrou o processo no LaunchServices (`lsappinfo find pid=` vazio), não pôs ícone no Dock, não abriu janela e não ativou o app. Sem argumentos, o executável abre a GUI e se registra como app `Foreground`, como antes. O motivo é que só o Tauri cria o `NSApplication`, e o modo CLI sai antes dele. O que vale para o Dock é quem inicializa o AppKit, não o fato de o binário estar no bundle.
+- **Efeito colateral no macOS verificado: nenhum.** Rodar o executável de dentro do `.app` pelo terminal (`.../Contents/MacOS/openvpngui status`, então com o nome antigo, build de debug assinado ad-hoc, macOS 27.2) não registrou o processo no LaunchServices (`lsappinfo find pid=` vazio), não pôs ícone no Dock, não abriu janela e não ativou o app. O mesmo vale pelo symlink `vpnconnect` que o cask cria. Sem argumentos, o executável abre a GUI e se registra como app `Foreground`, como antes. O motivo é que só o Tauri cria o `NSApplication`, e o modo CLI sai antes dele. O que vale para o Dock é quem inicializa o AppKit, não o fato de o binário estar no bundle.
+- O bundle id (`com.openfortivpn-connect.desktop`), o diretório de dados e o service do Keychain (`com.openvpngui.app`) mantêm os nomes antigos depois da renomeação da 0.6.0: trocá-los exigiria migrar os Profiles e regravar as senhas.
 - A CLI só funciona para root e o usuário logado no console, a regra de uid do Helper. Por SSH, sem console, o Helper recusa e a CLI sai com `HELPER_UNAUTHORIZED` (255).
 - O binário da CLI carrega o Tauri e o WebKit linkados, então é tão grande quanto o app. O custo de inicialização fica no carregamento dinâmico, sem janela nem runtime.
 - Testes de ponta a ponta usam `VPNCONNECT_TEST_HOME`, que só existe no build de debug (`cfg(debug_assertions)`). Ele troca o diretório de config, o Keychain (por arquivos em `keychain/`) e o socket do Helper (`helper.sock`) pelos de um diretório temporário. O binário release ignora a variável.
