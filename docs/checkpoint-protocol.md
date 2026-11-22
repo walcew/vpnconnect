@@ -75,13 +75,13 @@ Os pedidos levam `client_type (TRAC)`, a família de cliente que o gateway esper
 3. **Início da autenticação**: pedido `UserPass` com `client_type`, `username` e `password` vazios (ofuscados), o `client_logging_data` e `selectedLoginOption (<id>)`. A resposta traz `authn_status (continue)`, o `session_id` da autenticação e o `prompt` ofuscado, que desofuscado é a URL do IdP (**ref**). O Engine só aceita uma URL `https://`.
 4. **Espera no navegador**: o Helper escuta em `127.0.0.1:7779`, a porta fixa para onde o portal do gateway manda o navegador no fim do login (**ref**), e só então emite `waiting-saml` com a URL do passo 3. Porta ocupada vira `disconnected` com "Local SSO port 7779 is already in use", que cita quem costuma ocupá-la (o Check Point Endpoint Security ou o snx-rs). A espera dura 120 s, o prazo do snx-rs.
 5. **Código**: o navegador chega com `GET /<código>`. O listener é o mesmo do SAML do Fortinet (`browser_login.rs`: limite de tamanho e de conexões, 400 para qualquer outro pedido e o login continua). Vale só `GET` com um código de 1 a 1024 caracteres entre letras, dígitos e `-_.~%=+` (**inf**: o formato real do código não foi visto; o snx-rs aceita também `OPTIONS`).
-6. **Resposta do desafio**: pedido `MultiChallange` (a grafia é a do protocolo), com o `session_id` da autenticação no cabeçalho e `:RequestData (:client_type (TRAC) :auth_session_id (<sessão>) :user_input (<código ofuscado>))`. A resposta de sucesso traz `authn_status (done)`, `is_authenticated (true)`, `active_key` (a chave da sessão, ofuscada), o `session_id` da sessão e `active_key_timeout`. Sem `is_authenticated (true)`, é recusa do gateway (`cause: login-failed`), com o `error_message` desofuscado quando vier, sem caracteres de controle e cortado em 200 caracteres.
+6. **Resposta do desafio**: pedido `MultiChallange` (a grafia é a do protocolo), com o `session_id` da autenticação no cabeçalho e `:RequestData (:client_type (TRAC) :auth_session_id (<sessão>) :user_input (<código ofuscado>))`. A resposta de sucesso traz `authn_status (done)`, `is_authenticated (true)`, `active_key` (a chave da sessão, ofuscada), o `session_id` da sessão e `active_key_timeout`. `authn_status (done)` sem `is_authenticated (true)`, aqui ou no passo 3, é recusa do gateway (`cause: login-failed`), com o `error_message` desofuscado quando vier, sem caracteres de controle e cortado em 200 caracteres.
 
 A chave da sessão e o código do IdP ficam no Helper: não vão em evento, log nem resposta.
 
 ### Respostas de erro
 
-Só a recusa do gateway no passo 6 leva `cause: login-failed`; as outras falhas terminam em `disconnected` com a razão e sem `cause`. As do Profile são recusadas na resposta do `connect`, antes de qualquer contato com o gateway.
+Só a recusa explícita do gateway nos passos 3 e 6 leva `cause: login-failed`; as outras falhas terminam em `disconnected` com a razão e sem `cause`. As do Profile são recusadas na resposta do `connect`, antes de qualquer contato com o gateway.
 
 | Situação | Onde | Razão |
 |---|---|---|
@@ -95,7 +95,8 @@ Só a recusa do gateway no passo 6 leva `cause: login-failed`; as outras falhas 
 | Porta do listener ocupada | `disconnected` | "Local SSO port <porta> is already in use; close the app using it (e.g. Check Point Endpoint Security or snx-rs) and try again" |
 | Sem código em 120 s | `disconnected` | "Identity provider login timed out after 120 s" |
 | Desafio que não é do IdP, sem chave da sessão ou outro passo depois do código | `disconnected` | mensagem do passo |
-| Recusa no `MultiChallange` | `disconnected`, `cause: login-failed` | "Login failed: <error_message>" |
+| Recusa no `UserPass` ou no `MultiChallange` (`authn_status (done)` sem `is_authenticated (true)`) | `disconnected`, `cause: login-failed` | "Login failed: <error_message>" |
+| Resposta do `UserPass` ou do `MultiChallange` sem `authn_status` ou com outro valor | `disconnected` | "Unexpected gateway answer to the login" |
 | HTTP diferente de 200 ou `return_code` diferente de 600 | `disconnected` | "Gateway refused the request <tipo> (HTTP <n>)" ou "... with return code <n>" |
 
 ## Túnel
@@ -181,6 +182,7 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 
 - `expires_at` é o início do login mais `timeouts:authentication`; a sessão emite `expiring` 15 minutos antes e encerra com `cause: expired` no horário, como no Fortinet.
 - A sessão confere o relógio de parede a cada 10 s, além de dormir até o prazo: depois de um sleep do Mac, o aviso e a expiração saem no primeiro tick.
+
 ## Signout
 
 No `disconnect` do usuário, a sessão fecha o túnel, desfaz a rede e manda o pedido `Signout` com o `session_id` da sessão no cabeçalho e `:RequestData ()`, dentro do prazo curto que a sessão já impõe: um gateway mudo não segura a desconexão.

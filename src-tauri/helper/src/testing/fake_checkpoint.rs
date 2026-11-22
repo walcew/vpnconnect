@@ -57,6 +57,8 @@ pub struct CheckpointOptions {
     pub keepalive: Option<u64>,
     /// `timeouts:authentication` do `hello_reply`, em segundos (padrão `AUTH_TIMEOUT`).
     pub auth_timeout: Option<u64>,
+    /// Responde ao `UserPass` sem `authn_status`.
+    pub no_authn_status: bool,
 }
 
 struct Shared {
@@ -191,6 +193,7 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
     let kind = body.text("RequestHeader:type").unwrap_or_default().to_string();
     let reply = match kind.as_str() {
         "ClientHello" => server_info(&shared.options),
+        "UserPass" if shared.options.no_authn_status => response("UserPass", "", &format!("\t\t:session_id ({})", AUTH_SESSION)),
         "UserPass" if body.text("RequestData:selectedLoginOption") == Some(LOGIN_OPTION) => response(
             "UserPass",
             "",

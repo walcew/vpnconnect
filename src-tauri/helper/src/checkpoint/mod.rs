@@ -176,13 +176,14 @@ impl CheckPoint {
                 Some(key) => Ok(Step::Done(GatewaySession { id: session_id, key })),
                 None => Err(LoginError::Failed("The gateway returned no session key".into())),
             },
-            _ => Err(LoginError::Refused(format!(
+            Some("done") => Err(LoginError::Refused(format!(
                 "Login failed: {}",
                 reveal("error_message")
                     .map(|m| m.chars().filter(|c| !c.is_control()).take(MAX_ERROR_MESSAGE).collect::<String>())
                     .filter(|m| !m.is_empty())
                     .unwrap_or_else(|| "the gateway refused the login".into())
             ))),
+            _ => Err(LoginError::Failed("Unexpected gateway answer to the login".into())),
         }
     }
 

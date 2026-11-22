@@ -361,6 +361,7 @@ async fn login_fails_before_the_listener(options: CheckpointOptions, realm: Opti
     assert_eq!(state["state"], "disconnected", "{}", state);
     assert!(state.get("cause").is_none(), "{}", state);
     assert!(gw.requests().iter().all(|r| r.text("RequestHeader:type") == Some("ClientHello")), "the login started");
+    assert!(tokio::net::TcpStream::connect(("127.0.0.1", gw.login_port)).await.is_err(), "the listener opened");
     assert!(os.calls().is_empty());
     state["reason"].as_str().unwrap().to_string()
 }
@@ -737,4 +738,16 @@ async fn network_change_moves_the_gateway_route_and_sends_a_keepalive_at_once() 
     assert_eq!(os.calls()[before..], [OsCall::MoveGatewayRoute(IpAddr::V4(Ipv4Addr::LOCALHOST))]);
     assert_eq!(os.saved_state().unwrap()["gateway_via"], NEW_VIA.to_string());
     assert_still_connected(&mut c).await;
+}
+
+#[tokio::test]
+async fn login_answer_without_authn_status_is_not_login_failed() {
+    let gw = FakeCheckpoint::start(CheckpointOptions { no_authn_status: true, ..Default::default() }).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let state = next_state_after_connect(&mut c, gw.profile()).await;
+    assert_eq!(state["state"], "disconnected", "{}", state);
+    assert!(state["reason"].as_str().unwrap().contains("Unexpected gateway answer to the login"), "{}", state);
+    assert!(state.get("cause").is_none(), "{}", state);
+    assert!(os.calls().is_empty());
 }
