@@ -11,9 +11,6 @@ use tokio::task::JoinHandle;
 
 use crate::net::{Packets, TunnelConfig};
 
-/// Emite uma linha como evento de log da sessão.
-pub type LogFn = Arc<dyn Fn(String) + Send + Sync>;
-
 /// Credenciais do `connect`, repassadas ao Engine sem a sessão olhar dentro.
 pub struct Credentials {
     /// Vazia no login pelo navegador.
@@ -31,9 +28,11 @@ pub enum Waiting {
 
 /// Por que o login falhou.
 pub enum LoginError {
-    /// O gateway recusou as credenciais ou o segundo fator.
+    /// O gateway recusou o login. No Fortinet, os casos cuja razão começa com "Login failed":
+    /// usuário ou senha, OTP, push negado ou expirado e desafio de token incompleto.
     Refused(String),
-    /// Qualquer outra falha: rede, TLS, prazo, porta local ocupada, resposta inesperada.
+    /// Qualquer outra falha. No Fortinet: rede, TLS, OTP exigido e não informado e tudo do
+    /// SAML (porta local ocupada, prazo do navegador, gateway sem cookie).
     Failed(String),
 }
 

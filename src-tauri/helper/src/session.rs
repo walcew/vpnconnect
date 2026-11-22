@@ -8,11 +8,12 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinSet;
 
-use crate::engine::{Credentials, Engine, LogFn, LoginError, Tuning, Waiting};
+use crate::engine::{Credentials, Engine, LoginError, Tuning, Waiting};
 use crate::fortinet::Fortinet;
 use crate::net::{self, Os, Packets};
 use crate::profile::Profile;
 use crate::tls::{CertTrust, GatewayTls};
+use crate::LogFn;
 
 const GOOGLE_DNS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];
 /// Prazo do logout no disconnect pedido pelo usuário: gateway mudo não segura a desconexão.
@@ -24,7 +25,7 @@ const BANDWIDTH_INTERVAL: Duration = Duration::from_secs(1);
 const NETWORK_SETTLE: Duration = Duration::from_secs(1);
 /// Antecedência do aviso de expiração da sessão.
 const EXPIRY_WARNING: Duration = Duration::from_secs(15 * 60);
-/// Intervalo em que a expiração confere o relógio de parede, sem keepalive de teste.
+/// Intervalo em que a expiração confere o relógio de parede.
 const CLOCK_CHECK: Duration = Duration::from_secs(10);
 
 /// Relógio de parede da sessão; o teste o adianta para simular o sleep do Mac.
@@ -154,6 +155,7 @@ pub struct Session {
     /// Troca de rede ou wake durante uma sessão conectada.
     network: Notify,
     tuning: Tuning,
+    clock_check: Duration,
     expiry_warning: Duration,
     clock: Clock,
     bandwidth_interval: Duration,
@@ -180,6 +182,7 @@ impl Session {
             events: broadcast::channel(256).0,
             network: Notify::new(),
             tuning: Tuning::default(),
+            clock_check: CLOCK_CHECK,
             expiry_warning: EXPIRY_WARNING,
             clock: Arc::new(Utc::now),
             bandwidth_interval: BANDWIDTH_INTERVAL,
@@ -193,11 +196,17 @@ impl Session {
         self
     }
 
-    /// Intervalos e prazos curtos dos Engines, só para testes. O keepalive também marca a
-    /// conferência do relógio de parede na expiração.
+    /// Intervalos e prazos curtos dos Engines, só para testes.
     #[cfg(test)]
     pub fn with_tuning(mut self, tuning: Tuning) -> Self {
         self.tuning = tuning;
+        self
+    }
+
+    /// Conferência curta do relógio de parede na expiração, só para testes.
+    #[cfg(test)]
+    pub fn with_clock_check(mut self, interval: Duration) -> Self {
+        self.clock_check = interval;
         self
     }
 
@@ -357,7 +366,7 @@ impl Session {
         tokio::select! {
             r = engine.login(credentials, &waiting) => match r {
                 Ok(()) => {}
-                // shortcut: recusa e outra falha ainda saem iguais no `disconnected`; o `cause: login-failed` é a issue #45.
+                // shortcut: recusa e outra falha saem iguais no `disconnected`, separar quando entrar o `cause: login-failed` (#45).
                 Err(LoginError::Refused(e) | LoginError::Failed(e)) => return End::Failed(e),
             },
             _ = cancel.notified() => return End::Stopped,
@@ -477,7 +486,7 @@ impl Session {
         let Some(at) = expires_at else { return std::future::pending().await };
         let warn_at = at - chrono::Duration::from_std(self.expiry_warning).unwrap_or_default();
         let mut warned = false;
-        let mut tick = tokio::time::interval(self.tuning.keepalive.unwrap_or(CLOCK_CHECK));
+        let mut tick = tokio::time::interval(self.clock_check);
         loop {
             let now = self.now();
             if now >= at {
@@ -519,7 +528,7 @@ mod tests {
     use super::{Clock, Session};
     use crate::testing::fake_gateway::*;
     use crate::testing::fake_os::{Failure, FakeOs, OsCall, FIRST_VIA, NEW_VIA};
-    use crate::testing::{allow_all, connect, start_session, SAML_PORTS, start_with_bandwidth_interval, start_with_echo_interval, start_with_os, start_with_push_timeout, start_with_roots, Client};
+    use crate::testing::{allow_all, connect, start_session, SAML_PORTS, start_with_bandwidth_interval, start_with_keepalive, start_with_os, start_with_push_timeout, start_with_roots, Client};
 
     fn connect_cmd(gw: &FakeGateway, password: &str) -> Value {
         json!({"v": 2, "cmd": "connect", "profile": gw.profile(), "password": password, "otp": null})
@@ -572,7 +581,7 @@ mod tests {
     /// Conectada com o echo neste intervalo; devolve também a sessão, para injetar a troca de rede.
     async fn connected_session(echo: Duration, options: GatewayOptions) -> (FakeGateway, Client, std::sync::Arc<FakeOs>, Value, std::sync::Arc<Session>) {
         let gw = FakeGateway::start(options).await;
-        let (path, session, os) = start_with_echo_interval(echo).await;
+        let (path, session, os) = start_with_keepalive(echo).await;
         let mut c = client(&path).await;
         let state = connect_with(&mut c, &gw, PASSWORD).await;
         assert_eq!(state["state"], "connected", "{}", state);
@@ -1415,8 +1424,8 @@ mod tests {
 
     // ---- Túnel morto e expiração ----
 
-    /// Intervalo curto do LCP echo nos testes; a produção usa 10 s.
-    const ECHO: Duration = Duration::from_millis(50);
+    /// Keepalive curto nos testes (o LCP echo do Fortinet); a produção usa 10 s.
+    const KEEPALIVE: Duration = Duration::from_millis(50);
 
     /// Conecta numa sessão montada por `session` sobre um fake de SO novo.
     async fn connected_on(
@@ -1432,8 +1441,8 @@ mod tests {
         (gw, c, os, state)
     }
 
-    async fn connected_with_echo(options: GatewayOptions) -> (FakeGateway, Client, std::sync::Arc<FakeOs>, Value) {
-        let (gw, c, os, state, _) = connected_session(ECHO, options).await;
+    async fn connected_with_keepalive(options: GatewayOptions) -> (FakeGateway, Client, std::sync::Arc<FakeOs>, Value) {
+        let (gw, c, os, state, _) = connected_session(KEEPALIVE, options).await;
         (gw, c, os, state)
     }
 
@@ -1445,7 +1454,7 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_that_stops_answering_echo_drops_three_intervals_after_its_last_lcp() {
-        let (gw, mut c, os, _) = connected_with_echo(GatewayOptions { mute_echo: true, ..Default::default() }).await;
+        let (gw, mut c, os, _) = connected_with_keepalive(GatewayOptions { mute_echo: true, ..Default::default() }).await;
         let started = Instant::now();
         let state = c.recv_skipping_logs().await;
         assert_dropped(&state, "tunnel-dropped", "Tunnel dropped: no response from the gateway");
@@ -1455,7 +1464,7 @@ mod tests {
         // o piso de um intervalo, e não de dois.
         let echoes = gw.echo_requests();
         assert!((2..=3).contains(&echoes), "{} echo requests", echoes);
-        assert!(started.elapsed() >= ECHO && started.elapsed() < ECHO * 8, "took {:?}", started.elapsed());
+        assert!(started.elapsed() >= KEEPALIVE && started.elapsed() < KEEPALIVE * 8, "took {:?}", started.elapsed());
         assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
         assert_eq!(os.saved_state(), None);
         assert!(os.calls().contains(&OsCall::Down));
@@ -1484,7 +1493,7 @@ mod tests {
 
     #[tokio::test]
     async fn write_stuck_on_a_half_open_tunnel_is_a_dropped_tunnel() {
-        let (gw, mut c, os, _) = connected_with_echo(GatewayOptions::default()).await;
+        let (gw, mut c, os, _) = connected_with_keepalive(GatewayOptions::default()).await;
         let iface = os.take_packets();
         gw.stop_reading();
         // Tráfego até o buffer de envio encher e a escrita travar; para quando a sessão cair.
@@ -1534,11 +1543,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wall_clock_jump_after_sleep_warns_and_expires_on_the_next_echo_tick() {
+    async fn wall_clock_jump_after_sleep_warns_and_expires_on_the_next_keepalive_tick() {
         use std::sync::atomic::Ordering::SeqCst;
         let (clock, skew) = skewed_clock();
-        let tuning = crate::engine::Tuning { keepalive: Some(ECHO), ..Default::default() };
-        let session = move |os| Session::new(os).with_tuning(tuning).with_clock(clock);
+        let tuning = crate::engine::Tuning { keepalive: Some(KEEPALIVE), ..Default::default() };
+        let session = move |os| Session::new(os).with_tuning(tuning).with_clock_check(KEEPALIVE).with_clock(clock);
         let (gw, mut c, os, connected) = connected_on(session, GatewayOptions::default()).await;
 
         // Mac dormiu até 10 min antes da expiração: o relógio monotônico não andou.
@@ -1577,9 +1586,9 @@ mod tests {
     async fn healthy_session_stays_connected_past_three_echo_intervals() {
         // Expiração em 8 h (sem aviso agora) e sem expiração (`auth-timeout` 0).
         for auth_timeout in [None, Some(0)] {
-            let (gw, mut c, os, state) = connected_with_echo(GatewayOptions { auth_timeout, ..Default::default() }).await;
+            let (gw, mut c, os, state) = connected_with_keepalive(GatewayOptions { auth_timeout, ..Default::default() }).await;
             assert_eq!(state["expires_at"].is_null(), auth_timeout == Some(0), "{}", state);
-            tokio::time::sleep(ECHO * 6).await;
+            tokio::time::sleep(KEEPALIVE * 6).await;
             assert!(gw.echo_requests() >= 4, "only {} echo requests", gw.echo_requests());
             c.send(json!({"v": 2, "cmd": "status"})).await;
             // Nem `expiring` nem `disconnected` antes da resposta.

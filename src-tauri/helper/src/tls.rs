@@ -14,9 +14,9 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use tokio_rustls::rustls::{ClientConfig, DigitallySignedStruct, Error, RootCertStore, SignatureScheme};
 use tokio_rustls::TlsConnector;
 
-use crate::engine::LogFn;
 use crate::profile::Profile;
 use crate::validation::is_valid_hostname;
+use crate::LogFn;
 
 /// Raízes de confiança e histórico de digests, vivos enquanto o Helper roda.
 pub struct CertTrust {

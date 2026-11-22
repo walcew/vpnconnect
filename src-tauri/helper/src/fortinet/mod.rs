@@ -13,10 +13,11 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::browser_login;
-use crate::engine::{self, Credentials, LogFn, LoginError, Tuning, Tunnel, Waiting};
+use crate::engine::{self, Credentials, LoginError, Tuning, Tunnel, Waiting};
 use crate::net::{Packets, TunnelConfig};
 use crate::profile::{Auth, Profile};
 use crate::tls::GatewayTls;
+use crate::LogFn;
 
 const DEFAULT_MTU: u16 = 1354;
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
@@ -218,7 +219,8 @@ impl Fortinet {
     }
 
     /// Login SAML pelo navegador externo. `waiting` recebe a URL que a GUI abre no navegador,
-    /// depois que o listener local já está de pé. Todas as falhas são `LoginError::Failed`.
+    /// depois que o listener local já está de pé. Devolve só a razão da falha: no `login`,
+    /// toda falha do SAML vira `LoginError::Failed`.
     async fn saml_login(&self, waiting: &(dyn Fn(Waiting) + Sync)) -> Result<String, String> {
         let host = self.host_header();
         let info = self.request("GET", "/remote/info", &host, None, None).await?;

@@ -88,10 +88,11 @@ pub async fn start_with_bandwidth_interval(interval: Duration) -> (PathBuf, Arc<
     (path, session, os)
 }
 
-/// Como `start_with_os`, com o LCP echo neste intervalo em vez de a cada 10 s.
-pub async fn start_with_echo_interval(interval: Duration) -> (PathBuf, Arc<Session>, Arc<FakeOs>) {
+/// Como `start_with_os`, com o keepalive do Engine e a conferência do relógio neste intervalo em vez de a cada 10 s.
+pub async fn start_with_keepalive(interval: Duration) -> (PathBuf, Arc<Session>, Arc<FakeOs>) {
     let os = Arc::new(FakeOs::default());
-    let (path, session) = start_session(allow_all(), Session::new(os.clone()).with_tuning(Tuning { keepalive: Some(interval), ..Default::default() })).await;
+    let session = Session::new(os.clone()).with_tuning(Tuning { keepalive: Some(interval), ..Default::default() }).with_clock_check(interval);
+    let (path, session) = start_session(allow_all(), session).await;
     (path, session, os)
 }
 

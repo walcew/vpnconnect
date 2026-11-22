@@ -13,6 +13,10 @@ mod validation;
 
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+
+/// Emite uma linha como evento de log da sessão.
+pub type LogFn = Arc<dyn Fn(String) + Send + Sync>;
 
 #[tokio::main]
 async fn main() {
