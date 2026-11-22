@@ -8,10 +8,11 @@ use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinSet;
 
+use crate::checkpoint::CheckPoint;
 use crate::engine::{Credentials, Engine, LoginError, Tuning, Waiting};
 use crate::fortinet::Fortinet;
 use crate::net::{self, Os, Packets};
-use crate::profile::Profile;
+use crate::profile::{EngineKind, Profile};
 use crate::tls::{CertTrust, GatewayTls};
 use crate::LogFn;
 
@@ -262,7 +263,20 @@ impl Session {
             let _ = events.send(Event::Log { line });
         });
         let tls = Arc::new(GatewayTls::new(&profile, &self.trust, log.clone())?);
-        let mut engine = Fortinet::new(&profile, tls.clone(), log, self.tuning)?;
+        match profile.engine {
+            EngineKind::Fortinet => {
+                let engine = Fortinet::new(&profile, tls.clone(), log, self.tuning)?;
+                self.start(profile, engine, credentials, tls)
+            }
+            EngineKind::Checkpoint => {
+                let engine = CheckPoint::new(&profile, tls.clone(), self.tuning)?;
+                self.start(profile, engine, credentials, tls)
+            }
+        }
+    }
+
+    /// Reserva a sessão e conduz o Engine numa task supervisionada.
+    fn start<E: Engine + 'static>(self: &Arc<Self>, profile: Profile, mut engine: E, credentials: Credentials, tls: Arc<GatewayTls>) -> Result<(), String> {
         let cancel = Arc::new(Notify::new());
         {
             let mut inner = self.inner.lock().unwrap();
@@ -538,19 +552,10 @@ mod tests {
     use super::{Clock, Session};
     use crate::testing::fake_gateway::*;
     use crate::testing::fake_os::{Failure, FakeOs, OsCall, FIRST_VIA, NEW_VIA};
-    use crate::testing::{allow_all, connect, start_session, SAML_PORTS, start_with_bandwidth_interval, start_with_keepalive, start_with_os, start_with_push_timeout, start_with_roots, Client};
+    use crate::testing::{allow_all, client, disconnect, start_session, SAML_PORTS, start_with_bandwidth_interval, start_with_keepalive, start_with_os, start_with_push_timeout, start_with_roots, Client};
 
     fn connect_cmd(gw: &FakeGateway, password: &str) -> Value {
         json!({"v": 2, "cmd": "connect", "profile": gw.profile(), "password": password, "otp": null})
-    }
-
-    /// Cliente já com o evento inicial de estado lido.
-    async fn client(path: &std::path::PathBuf) -> Client {
-        let mut c = connect(path).await;
-        c.send(json!({"v": 2, "cmd": "status"})).await;
-        assert_eq!(c.recv_skipping_logs().await["state"], "disconnected");
-        assert_eq!(c.recv_skipping_logs().await["type"], "response");
-        c
     }
 
     /// Manda o connect e espera `connecting` e o estado seguinte.
@@ -955,18 +960,6 @@ mod tests {
         gw.send_ip(vec![0x45; 60]);
         assert!(tokio::time::timeout(Duration::from_secs(5), iface.rx.recv()).await.unwrap().is_some());
         assert_eq!(next_bandwidth(&mut c).await, (100, 100));
-    }
-
-    async fn disconnect(c: &mut Client) -> Value {
-        c.send(json!({"v": 2, "cmd": "disconnect"})).await;
-        loop {
-            let v = c.recv_skipping_logs().await;
-            if v["type"] == "response" {
-                assert_eq!(v["ok"], true);
-            } else if v["state"] == "disconnected" {
-                return v;
-            }
-        }
     }
 
     #[tokio::test]

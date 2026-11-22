@@ -1,6 +1,8 @@
 mod browser_login;
+mod checkpoint;
 mod engine;
 mod fortinet;
+mod http;
 mod net;
 mod profile;
 mod protocol;

@@ -1,7 +1,6 @@
 //! Engine Fortinet SSL VPN: login HTTP, `fortisslvpn_xml`, túnel TLS e PPP.
 //! O protocolo está descrito em `docs/fortinet-protocol.md`.
 
-mod http;
 mod ppp;
 mod saml;
 mod xml;
@@ -13,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::browser_login;
+use crate::http;
 use crate::engine::{self, Credentials, LoginError, Tuning, Tunnel, Waiting};
 use crate::net::{Packets, TunnelConfig};
 use crate::profile::{Auth, Profile};

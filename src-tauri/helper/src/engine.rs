@@ -44,6 +44,8 @@ pub struct Tuning {
     pub keepalive: Option<Duration>,
     /// Espera pela aprovação no celular.
     pub push_timeout: Option<Duration>,
+    /// Porta do listener do login pelo IdP do Check Point (7779 na produção).
+    pub login_port: Option<u16>,
 }
 
 /// Um protocolo de VPN, conduzido pela sessão numa ordem fixa: `login`, `open_tunnel` e,

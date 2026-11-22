@@ -14,7 +14,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, Notify};
 use tokio_rustls::rustls::RootCertStore;
 
-use super::fake_server::{read_request, CertOptions, TlsServer};
+use super::fake_server::{free_login_port, read_request, CertOptions, TlsServer};
 
 pub const PROFILE_ID: &str = "8d3c1f5e-0000-4000-8000-000000000001";
 pub const USERNAME: &str = "alice";
@@ -120,7 +120,7 @@ impl FakeGateway {
         let acceptor = tls.acceptor.clone();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let sso_port = free_sso_port();
+        let sso_port = free_login_port();
 
         let (from_tx, from_rx) = mpsc::unbounded_channel();
         let (to_tx, to_rx) = mpsc::unbounded_channel();
@@ -213,19 +213,6 @@ impl FakeGateway {
         let mut rx = self.from_client.lock().await;
         tokio::time::timeout(Duration::from_secs(5), rx.recv()).await.expect("no IP packet reached the gateway").unwrap()
     }
-}
-
-/// Porta livre fora da faixa efêmera do macOS (49152–65535): nenhum `bind` em 0 nem conexão de
-/// saída de outro teste em paralelo cai nela, então "listener fechado" só depende do listener
-/// SAML. Entre os testes SAML, quem evita a disputa é o `SAML_PORTS`.
-fn free_sso_port() -> u16 {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    // Começa num ponto diferente por processo e por gateway, para não repetir a porta recém-usada.
-    let start = std::process::id() as usize + NEXT.fetch_add(1, Ordering::Relaxed) * 17;
-    (0..10000)
-        .map(|i| 20000 + ((start + i) % 10000) as u16)
-        .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
-        .expect("no free port in 20000-29999")
 }
 
 async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: S, shared: Arc<Shared>) {

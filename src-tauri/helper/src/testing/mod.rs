@@ -1,6 +1,7 @@
 //! Apoio aos testes no seam da sessão: cliente do socket, fake da camada de SO, apoio comum
-//! dos gateways falsos (TLS e HTTP) e gateway Fortinet falso.
+//! dos gateways falsos (TLS e HTTP) e gateways Fortinet e Check Point falsos.
 
+pub mod fake_checkpoint;
 pub mod fake_gateway;
 pub mod fake_os;
 pub mod fake_server;
@@ -10,7 +11,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
@@ -116,6 +117,28 @@ pub async fn start_session(authorizer: Authorizer, session: Session) -> (PathBuf
 pub async fn connect(path: &PathBuf) -> Client {
     let (r, writer) = tokio::net::UnixStream::connect(path).await.unwrap().into_split();
     Client { lines: BufReader::new(r).lines(), writer }
+}
+
+/// Cliente já com o evento inicial de estado lido.
+pub async fn client(path: &PathBuf) -> Client {
+    let mut c = connect(path).await;
+    c.send(json!({"v": 2, "cmd": "status"})).await;
+    assert_eq!(c.recv_skipping_logs().await["state"], "disconnected");
+    assert_eq!(c.recv_skipping_logs().await["type"], "response");
+    c
+}
+
+/// Manda o `disconnect` e devolve o estado `disconnected` que vem depois.
+pub async fn disconnect(c: &mut Client) -> Value {
+    c.send(json!({"v": 2, "cmd": "disconnect"})).await;
+    loop {
+        let v = c.recv_skipping_logs().await;
+        if v["type"] == "response" {
+            assert_eq!(v["ok"], true);
+        } else if v["state"] == "disconnected" {
+            return v;
+        }
+    }
 }
 
 pub fn allow_all() -> Authorizer {

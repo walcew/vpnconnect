@@ -1,6 +1,7 @@
 //! Apoio comum dos gateways falsos: servidor TLS em loopback com certificado gerado no teste
 //! (autoassinado, assinado por CA de teste, nome errado, chave trocada) e leitura de requisições HTTP.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, KeyUsagePurpose, SanType};
@@ -121,4 +122,17 @@ pub async fn read_request<S: AsyncRead + Unpin>(stream: &mut S) -> Option<Reques
     request.body = vec![0u8; len];
     stream.read_exact(&mut request.body).await.ok()?;
     Some(request)
+}
+
+/// Porta livre fora da faixa efêmera do macOS (49152–65535): nenhum `bind` em 0 nem conexão de
+/// saída de outro teste em paralelo cai nela, então "listener fechado" só depende do listener
+/// de login pelo navegador. Entre esses testes, quem evita a disputa é o `SAML_PORTS`.
+pub fn free_login_port() -> u16 {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    // Começa num ponto diferente por processo e por gateway, para não repetir a porta recém-usada.
+    let start = std::process::id() as usize + NEXT.fetch_add(1, Ordering::Relaxed) * 17;
+    (0..10000)
+        .map(|i| 20000 + ((start + i) % 10000) as u16)
+        .find(|p| std::net::TcpListener::bind(("127.0.0.1", *p)).is_ok())
+        .expect("no free port in 20000-29999")
 }

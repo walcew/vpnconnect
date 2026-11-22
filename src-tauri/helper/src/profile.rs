@@ -5,7 +5,7 @@ use std::net::Ipv4Addr;
 use serde::Deserialize;
 
 /// Métodos de autenticação que o Helper já fala.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Auth {
     Password,
@@ -13,10 +13,21 @@ pub enum Auth {
     Saml,
 }
 
+/// O Engine do Profile; sem o campo, Fortinet (Profiles de antes do Check Point).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EngineKind {
+    #[default]
+    Fortinet,
+    Checkpoint,
+}
+
 /// Só o que o Helper usa; o resto é ignorado.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Profile {
     pub id: String,
+    #[serde(default)]
+    pub engine: EngineKind,
     pub host: String,
     pub port: u16,
     pub auth: Auth,
@@ -36,7 +47,8 @@ pub struct Profile {
     /// sem DNS no sistema). Só valem, com os do Google, se o gateway não mandar servidor.
     #[serde(default)]
     pub dns_fallback_servers: Vec<Ipv4Addr>,
-    /// Realm do login por senha; ausente ou vazio manda `realm=` vazio.
+    /// Fortinet: realm do login por senha; ausente ou vazio manda `realm=` vazio. Check Point:
+    /// id da opção de login; ausente ou vazio usa a única opção de IdP do gateway.
     #[serde(default)]
     pub realm: Option<String>,
 }

@@ -1,4 +1,4 @@
-//! O mínimo de HTTP/1.1 que o protocolo usa.
+//! O mínimo de HTTP/1.1 que os Engines usam com o gateway.
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
