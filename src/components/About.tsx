@@ -67,7 +67,7 @@ export function About({ onBack }: Props) {
 
         {/* Disclaimer */}
         <p className="text-xs text-white/30 leading-relaxed">
-          This project is not affiliated with Fortinet or FortiClient. This is an independent
+          This project is not affiliated with Fortinet, FortiClient or Check Point. This is an independent
           open-source project. All trademarks belong to their respective owners.
         </p>
       </div>

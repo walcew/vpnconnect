@@ -32,7 +32,7 @@ const LOGIN_PORT: u16 = 7779;
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(120);
 const STEP_TIMEOUT: Duration = Duration::from_secs(15);
 /// Sem MTU no `hello_reply`, o mesmo valor do snx-rs.
-// shortcut: MTU fixo, sem campo conhecido no `hello_reply`, confirmar no gateway real (#52).
+// shortcut: MTU fixo (funciona no gateway de validação), ler do gateway se algum anunciar um campo de MTU.
 const DEFAULT_MTU: u16 = 1350;
 /// Sem `keepalive` no `hello_reply` (**inf**).
 const DEFAULT_KEEPALIVE: Duration = Duration::from_secs(20);
@@ -72,7 +72,7 @@ enum Step {
 pub struct CheckPoint {
     host: String,
     /// Porta do Profile, para o canal de controle e o túnel.
-    // shortcut: ignora o `tcpt_port` das informações do servidor, confirmar no gateway real (#52).
+    // shortcut: ignora o `tcpt_port` das informações do servidor (o gateway de validação usa a mesma porta), usar se algum gateway separar as portas.
     port: u16,
     /// Id da opção de login do Profile; vazio usa a única opção de IdP.
     login_option: String,
