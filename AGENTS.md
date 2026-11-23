@@ -1,6 +1,6 @@
 # VPN Connect
 
-Cliente macOS para VPNs FortiGate SSL-VPN. A GUI (Tauri 2, React) e a CLI `vpnconnect` são clientes iguais do Helper, o daemon root que hospeda o Engine Fortinet próprio. A CLI é um modo do mesmo executável: com argumentos roda a CLI, sem argumentos abre a GUI.
+Cliente macOS para VPNs FortiGate SSL-VPN e Check Point (túnel SSL, com o login pelo IdP no navegador). A GUI (Tauri 2, React) e a CLI `vpnconnect` são clientes iguais do Helper, o daemon root que hospeda os dois Engines próprios, Fortinet e Check Point. O Profile escolhe o Engine na criação e ele não muda depois. A CLI é um modo do mesmo executável: com argumentos roda a CLI, sem argumentos abre a GUI.
 
 ## Testes e build
 
@@ -14,6 +14,7 @@ Cliente macOS para VPNs FortiGate SSL-VPN. A GUI (Tauri 2, React) e a CLI `vpnco
 - `GLOSSARY.md`: a linguagem do domínio (Profile, Helper, Engine, CLI). Use esses termos no código, nos testes e nos commits.
 - `docs/adr/`: decisões de arquitetura. Leia antes de mexer na área que cada uma cobre.
 - `docs/fortinet-protocol.md`: o protocolo Fortinet que o Engine fala.
+- `docs/checkpoint-protocol.md`: o protocolo Check Point que o Engine fala (túnel SSL e login pelo IdP).
 
 ## CLI em paridade com a GUI (OBRIGATÓRIO)
 

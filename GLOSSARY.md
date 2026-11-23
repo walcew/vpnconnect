@@ -1,11 +1,11 @@
 # VPN Connect
 
-Cliente macOS para VPNs FortiGate SSL-VPN, com Engine próprio rodando no Helper.
+Cliente macOS para VPNs FortiGate SSL-VPN e Check Point, com um Engine próprio para cada um rodando no Helper.
 
 ## Language
 
 **Profile**:
-A configuração salva de um gateway VPN: host, porta, método de autenticação e certificados confiáveis.
+A configuração salva de um gateway VPN: Engine, host, porta, método de autenticação, certificados confiáveis e domínios DNS. O Engine é fixo depois da criação; no Check Point o Profile entra sempre pelo IdP, sem usuário, senha nem OTP.
 _Avoid_: Connection, account, server
 
 **Helper**:

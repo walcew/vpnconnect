@@ -66,7 +66,7 @@ Cada pedido é um `POST /clients/` numa conexão TLS nova, com `Connection: clos
 
 ### Identificação do cliente
 
-Os pedidos levam `client_type (TRAC)`, a família de cliente que o gateway espera (a do Endpoint Security VPN, **ref**), e não o sistema. O pedido de login traz `client_logging_data` com `client_name ("VPN Connect")`, `client_ver (<versão do Helper>)` e `os_name (macOS)`: o Engine se declara como é. O snx-rs se declara Windows e manda também um `device_id`; se o gateway de validação recusar a identificação honesta, este trecho registra o motivo (a confirmar no #52).
+Os pedidos levam `client_type (TRAC)`, a família de cliente que o gateway espera (a do Endpoint Security VPN, **ref**), e não o sistema. O pedido de login traz `client_logging_data` com `client_name ("VPN Connect")`, `client_ver (<versão do Helper>)` e `os_name (macOS)`: o Engine se declara como é. O snx-rs se declara Windows e manda também um `device_id`; se o gateway de validação recusar a identificação honesta, este trecho registra o motivo (a confirmar no aceite manual da 0.7.0, #53).
 
 ## Login pelo IdP
 
@@ -97,7 +97,7 @@ Só a recusa explícita do gateway nos passos 3 e 6 leva `cause: login-failed`; 
 | Desafio que não é do IdP, sem chave da sessão ou outro passo depois do código | `disconnected` | mensagem do passo |
 | Recusa no `UserPass` ou no `MultiChallange` (`authn_status (done)` sem `is_authenticated (true)`) | `disconnected`, `cause: login-failed` | "Login failed: <error_message>" |
 | Resposta do `UserPass` ou do `MultiChallange` sem `authn_status` ou com outro valor | `disconnected` | "Unexpected gateway answer to the login" |
-| HTTP diferente de 200 ou `return_code` diferente de 600 | `disconnected` | "Gateway refused the request <tipo> (HTTP <n>)" ou "... with return code <n>" |
+| HTTP diferente de 200 ou `return_code` diferente de 600 | `disconnected` | "Gateway refused the request <tipo> (HTTP <n>)" ou "... with return code \"<n>\"" |
 
 ## Túnel
 
@@ -166,7 +166,7 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 - O MTU é 1350, o do snx-rs: nenhum campo de MTU é conhecido (**inf**).
 - Cada intervalo vira os blocos CIDR que o cobrem, do maior alinhado em diante. Amostras: `10.1.0.0`–`10.1.255.255` vira `10.1.0.0/16`; `172.16.4.0`–`172.16.6.255` vira `172.16.4.0/23` e `172.16.6.0/24`; `10.0.0.1`–`10.0.0.6` vira `.1/32`, `.2/31`, `.4/31` e `.6/32`; `0.0.0.0`–`255.255.255.255` vira a rota default, que a camada de rede aplica em duas metades. Intervalo invertido não dá rota.
 - Intervalo cujo `from` está em `0.0.0.0/8` sai das rotas, com log. O snx-rs descarta os que começam em `0.0.0.1` (**ref**); o Engine descarta a rede `0.0.0.0/8` inteira, que não é endereçável, para um intervalo assim não virar um túnel completo disfarçado de split (**inf**: o significado desse início não é conhecido). O túnel completo do Check Point não é suportado.
-- Os domínios DNS do Profile substituem os sufixos do gateway, como no Fortinet.
+- Os domínios DNS do Profile substituem os sufixos do gateway, como no Fortinet. Com sufixos, só os nomes sob eles vão ao DNS da VPN: um gateway cujos nomes internos ficam fora dos sufixos que ele anuncia exige `--dns-domain` no Profile.
 
 ### Faixas de rede (`ClientSettings`)
 
