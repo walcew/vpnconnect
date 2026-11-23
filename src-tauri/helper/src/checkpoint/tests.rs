@@ -185,10 +185,55 @@ async fn refused_client_settings_without_hello_ranges_fails_the_connect_and_sign
 #[tokio::test]
 async fn refused_client_settings_with_hello_ranges_keeps_the_hello_routes() {
     let _ports = SAML_PORTS.lock().await;
-    let options = CheckpointOptions { hello_range: true, refuse_client_settings: true, ..Default::default() };
-    let (_gw, mut c, os, _, _) = connected(options, Tuning::default(), |s| s).await;
+    let gw = FakeCheckpoint::start(CheckpointOptions { hello_range: true, refuse_client_settings: true, ..Default::default() }).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let (_, frames) = idp_connect(&mut c, &gw, gw.profile()).await;
     assert_eq!(added_routes(&os), ROUTES.map(|(a, m)| route(a, m)));
+    assert!(frames.iter().any(|f| f["line"].as_str().is_some_and(|l| l.starts_with("using the hello_reply ranges only"))), "no fallback log");
     assert_eq!(disconnect(&mut c).await["state"], "disconnected");
+}
+
+#[tokio::test]
+async fn client_settings_without_ranges_and_no_hello_ranges_fails_the_connect_and_signs_out() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions { settings_ranges: Some(vec![]), ..Default::default() }).await;
+    let (mut c, os) = waiting(&gw, Tuning::default()).await;
+    assert!(browser(gw.login_port, &format!("GET /{}", IDP_CODE)).await.starts_with("HTTP/1.1 200 OK"));
+    let state = next_state(&mut c).await;
+    assert_eq!(state["state"], "disconnected", "{}", state);
+    assert_eq!(state["reason"], "The gateway announced no network ranges for the tunnel", "{}", state);
+    assert!(os.calls().is_empty(), "{:?}", os.calls());
+    assert_eq!(gw.logouts(), 1);
+}
+
+#[tokio::test]
+async fn ranges_starting_in_zero_slash_eight_are_dropped_with_a_log() {
+    let _ports = SAML_PORTS.lock().await;
+    let mut ranges = RANGES.to_vec();
+    ranges.push(("0.0.0.1", "255.255.255.255"));
+    let gw = FakeCheckpoint::start(CheckpointOptions { settings_ranges: Some(ranges), ..Default::default() }).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let (_, frames) = idp_connect(&mut c, &gw, gw.profile()).await;
+    assert_eq!(added_routes(&os), ROUTES.map(|(a, m)| route(a, m)));
+    assert!(frames.iter().any(|f| f["line"] == "ignoring advertised range 0.0.0.1-255.255.255.255: it starts in 0.0.0.0/8"), "no ignoring log");
+    assert_eq!(disconnect(&mut c).await["state"], "disconnected");
+}
+
+#[test]
+fn range_routes_drop_repeats_and_refuse_too_many_ranges_or_routes() {
+    let log: crate::LogFn = Arc::new(|_| {});
+    let ip = |s: &str| s.parse::<Ipv4Addr>().unwrap();
+    let repeated = [(ip("10.1.0.0"), ip("10.1.255.255")), (ip("10.1.0.0"), ip("10.1.255.255")), (ip("10.1.0.0"), ip("10.1.0.255"))];
+    let routes = super::range_routes(&repeated, &log).unwrap();
+    assert_eq!(routes, [route("10.1.0.0", "255.255.0.0"), route("10.1.0.0", "255.255.255.0")]);
+
+    let many = vec![(ip("10.0.0.1"), ip("10.0.0.1")); 1025];
+    assert!(super::range_routes(&many, &log).unwrap_err().contains("more than the limit of 1024"));
+    // Cada faixa .1–.254 vira 14 blocos: 300 faixas passam de 4096 rotas.
+    let wide: Vec<_> = (0..300u32).map(|i| (Ipv4Addr::from(0x0a00_0001 + (i << 8)), Ipv4Addr::from(0x0a00_00fe + (i << 8)))).collect();
+    assert!(super::range_routes(&wide, &log).unwrap_err().contains("more than 4096 routes"));
 }
 
 #[test]

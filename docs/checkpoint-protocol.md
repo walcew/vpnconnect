@@ -165,7 +165,7 @@ O gateway responde com o `hello_reply`, ou com `(disconnect :code (<n>) :message
 - Valor de `timeouts` acima do teto vale o teto, e ilegível conta como ausente; os dois saem no log.
 - O MTU é 1350, o do snx-rs: nenhum campo de MTU é conhecido (**inf**).
 - Cada intervalo vira os blocos CIDR que o cobrem, do maior alinhado em diante. Amostras: `10.1.0.0`–`10.1.255.255` vira `10.1.0.0/16`; `172.16.4.0`–`172.16.6.255` vira `172.16.4.0/23` e `172.16.6.0/24`; `10.0.0.1`–`10.0.0.6` vira `.1/32`, `.2/31`, `.4/31` e `.6/32`; `0.0.0.0`–`255.255.255.255` vira a rota default, que a camada de rede aplica em duas metades. Intervalo invertido não dá rota.
-- O snx-rs descarta intervalos que começam em `0.0.0.1`; o Engine roteia o intervalo como vem (**inf**: o significado desse início não é conhecido).
+- Intervalo cujo `from` está em `0.0.0.0/8` sai das rotas, com log. O snx-rs descarta os que começam em `0.0.0.1` (**ref**); o Engine descarta a rede `0.0.0.0/8` inteira, que não é endereçável, para um intervalo assim não virar um túnel completo disfarçado de split (**inf**: o significado desse início não é conhecido). O túnel completo do Check Point não é suportado.
 - Os domínios DNS do Profile substituem os sufixos do gateway, como no Fortinet.
 
 ### Faixas de rede (`ClientSettings`)
@@ -193,7 +193,8 @@ A lista `range` vazia pede a política de faixas sem versão conhecida (**inf**)
 			:name (range))))
 ```
 
-- As rotas são a união das faixas do `range` do `hello_reply`, quando vier, com as do `ClientSettings`, sem repetir bloco. Cada faixa vira blocos CIDR como na seção anterior.
+- As rotas são a união das faixas do `range` do `hello_reply`, quando vier, com as do `ClientSettings`, sem repetir bloco, nem dentro de uma mesma fonte. Cada faixa vira blocos CIDR como na seção anterior, com o mesmo descarte de `0.0.0.0/8`.
+- Tetos (**inf**): mais de 1024 faixas somando as duas fontes, ou mais de 4096 rotas geradas, derruba o `connect`.
 - O resto da resposta (`gw_internal_ip`, outras políticas como `mep` e `scv`) é ignorado.
 - A faixa que é exatamente o /32 do próprio gateway sai das rotas, com log, como no Fortinet: ela colidiria com o /32 pela interface física.
 - Falha do `ClientSettings` (HTTP, `return_code` ou resposta ilegível) sem `range` no `hello_reply` derruba o `connect`, com `Signout`: sem rota o túnel pareceria conectado e não passaria nada. Com `range` no `hello_reply`, a falha sai no log e o túnel sobe com essas faixas.
@@ -203,6 +204,8 @@ A lista `range` vazia pede a política de faixas sem versão conhecida (**inf**)
 |---|---|
 | `ClientSettings` falhou e o `hello_reply` não trouxe `range` | "Could not get the network ranges from the gateway: <motivo>" |
 | Nenhuma faixa no `hello_reply` nem no `ClientSettings` | "The gateway announced no network ranges for the tunnel" |
+| Mais de 1024 faixas | "The gateway announced <n> network ranges, more than the limit of 1024" |
+| Mais de 4096 rotas | "The gateway network ranges make more than 4096 routes" |
 
 ### Com o túnel de pé
 

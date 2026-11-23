@@ -7,6 +7,7 @@ mod slim;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -45,6 +46,9 @@ const CLIENT_TYPE: &str = "TRAC";
 /// Retorno de sucesso no cabeçalho das respostas do canal de controle.
 const RETURN_OK: &str = "600";
 const MAX_LOGIN_OPTION_LEN: usize = 64;
+/// Tetos das faixas de rede anunciadas e das rotas que elas viram.
+const MAX_RANGES: usize = 1024;
+const MAX_ROUTES: usize = 4096;
 /// O formato do código é **inf**: aceita o que cabe num caminho de URL sem escape, com folga no tamanho.
 const MAX_CODE: usize = 1024;
 
@@ -231,14 +235,30 @@ fn settings_request() -> Sexp {
     Sexp::obj("ClientSettings", vec![("requested_policies_and_current_versions", Sexp::obj("", vec![("range", Sexp::val(""))]))])
 }
 
-/// Rotas de uma lista de faixas `from`/`to`, ignorando as ilegíveis.
-fn ranges(node: Option<&Sexp>) -> Vec<Route> {
-    node.map(Sexp::children)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|r| Some((r.text("from")?.parse().ok()?, r.text("to")?.parse().ok()?)))
-        .flat_map(|(from, to)| slim::range_to_routes(from, to))
-        .collect()
+/// Faixas `from`/`to` de uma lista, ignorando as ilegíveis.
+fn range_list(node: Option<&Sexp>) -> Vec<(Ipv4Addr, Ipv4Addr)> {
+    node.map(Sexp::children).unwrap_or_default().iter().filter_map(|r| Some((r.text("from")?.parse().ok()?, r.text("to")?.parse().ok()?))).collect()
+}
+
+/// Rotas das faixas, na ordem e sem repetir bloco. Faixa que começa em 0.0.0.0/8 sai com log, como
+/// nos clientes de referência: seria um túnel completo disfarçado. Acima dos tetos é erro.
+fn range_routes(ranges: &[(Ipv4Addr, Ipv4Addr)], log: &LogFn) -> Result<Vec<Route>, String> {
+    if ranges.len() > MAX_RANGES {
+        return Err(format!("The gateway announced {} network ranges, more than the limit of {}", ranges.len(), MAX_RANGES));
+    }
+    let mut seen = HashSet::new();
+    let mut routes = Vec::new();
+    for (from, to) in ranges {
+        if from.octets()[0] == 0 {
+            log(format!("ignoring advertised range {}-{}: it starts in 0.0.0.0/8", from, to));
+            continue;
+        }
+        routes.extend(slim::range_to_routes(*from, *to).into_iter().filter(|r| seen.insert((r.addr, r.mask))));
+        if routes.len() > MAX_ROUTES {
+            return Err(format!("The gateway network ranges make more than {} routes", MAX_ROUTES));
+        }
+    }
+    Ok(routes)
 }
 
 /// Servidores de uma lista de valores IPv4, ignorando o que não for endereço.
@@ -334,18 +354,13 @@ impl engine::Engine for CheckPoint {
         let ip: Ipv4Addr = reply.text("OM:ipaddr").and_then(|v| v.parse().ok()).ok_or("The gateway assigned no tunnel address")?;
         // O gateway de validação não manda `range` no `hello_reply`: as faixas vêm do `ClientSettings`.
         // Se ele falhar sem `range` no hello, o túnel falha: sem rota ele pareceria conectado e não passaria nada.
-        let mut routes = ranges(reply.get("range"));
+        let mut ranges = range_list(reply.get("range"));
         match self.request("ClientSettings", &session.id, settings_request()).await {
-            Ok(data) => {
-                for r in ranges(data.get("updated_policies:range:settings")) {
-                    if !routes.contains(&r) {
-                        routes.push(r);
-                    }
-                }
-            }
-            Err(e) if !routes.is_empty() => (self.log)(format!("using the hello_reply ranges only: {}", e)),
+            Ok(data) => ranges.extend(range_list(data.get("updated_policies:range:settings"))),
+            Err(e) if !ranges.is_empty() => (self.log)(format!("using the hello_reply ranges only: {}", e)),
             Err(e) => return Err(format!("Could not get the network ranges from the gateway: {}", e)),
         }
+        let routes = range_routes(&ranges, &self.log)?;
         if routes.is_empty() {
             return Err("The gateway announced no network ranges for the tunnel".into());
         }

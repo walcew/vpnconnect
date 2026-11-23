@@ -1,7 +1,7 @@
 //! Gateway Check Point falso em loopback, sobre o apoio comum de `fake_server`. Implementa o canal
 //! de controle (`POST /clients/`: informações do servidor, início do login pelo IdP, resposta do
-//! desafio, `ClientSettings` com as faixas de rede e signout) e o lado servidor do túnel SSL (`client_hello`, `hello_reply`, quadros de
-//! dados e keepalive). As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
+//! desafio, `ClientSettings` com as faixas de rede e signout) e o lado servidor do túnel SSL
+//! (`client_hello`, `hello_reply`, quadros de dados e keepalive). As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
 //! só a leitura dos pedidos e a ofuscação usam o codec do Engine, que tem testes de unidade próprios.
 //! Modos novos entram como campos em `CheckpointOptions`.
 
@@ -65,6 +65,8 @@ pub struct CheckpointOptions {
     pub hello_range: bool,
     /// Recusa o `ClientSettings` com um retorno diferente de 600.
     pub refuse_client_settings: bool,
+    /// Faixas do `ClientSettings` no lugar de `RANGES` + `GATEWAY_RANGE`.
+    pub settings_ranges: Option<Vec<(&'static str, &'static str)>>,
 }
 
 struct Shared {
@@ -223,8 +225,9 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
             response("MultiChallange", AUTH_SESSION, &data)
         }
         "ClientSettings" if !shared.options.refuse_client_settings && body.text("RequestHeader:session_id") == Some(SESSION_ID) => {
+            let ranges = shared.options.settings_ranges.clone().unwrap_or_else(|| RANGES.iter().copied().chain([GATEWAY_RANGE]).collect());
             let settings: String =
-                RANGES.iter().chain([&GATEWAY_RANGE]).map(|(from, to)| format!("\n\t\t\t\t: (\n\t\t\t\t\t:from ({})\n\t\t\t\t\t:to ({}))", from, to)).collect();
+                ranges.iter().map(|(from, to)| format!("\n\t\t\t\t: (\n\t\t\t\t\t:from ({})\n\t\t\t\t\t:to ({}))", from, to)).collect();
             response(
                 "ClientSettings",
                 SESSION_ID,
