@@ -2,7 +2,8 @@
 //! de controle (`POST /clients/`: informações do servidor, início do login pelo IdP, resposta do
 //! desafio, `ClientSettings` com as faixas de rede e signout) e o lado servidor do túnel SSL
 //! (`client_hello`, `hello_reply`, quadros de dados, keepalive e `disconnect`). Como o gateway de
-//! validação, responde 699 ao `Signout` de uma sessão cujo túnel já foi aberto. As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
+//! validação, responde 699 ao `Signout` de uma sessão cujo túnel já foi aberto; o `Signout` só é
+//! atendido depois que o túnel fechou, para a ordem `disconnect` → `Signout` ser determinística. As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
 //! só a leitura dos pedidos e a ofuscação usam o codec do Engine, que tem testes de unidade próprios.
 //! Modos novos entram como campos em `CheckpointOptions`.
 
@@ -19,6 +20,7 @@ use tokio::sync::{mpsc, Notify};
 use super::fake_gateway::PROFILE_ID;
 use super::fake_server::{free_login_port, read_request, CertOptions, TlsServer};
 use crate::checkpoint::sexp::{self, Sexp};
+use crate::checkpoint::slim::DISCONNECT_CODE;
 
 pub const LOGIN_OPTION: &str = "vpn_Corp_SSO";
 /// URL do IdP que o desafio traz (ofuscada) e que vira o `url` do `waiting-saml`.
@@ -43,6 +45,10 @@ pub const AUTH_TIMEOUT: u64 = 43200;
 
 const CONTROL: u32 = 1;
 const DATA: u32 = 2;
+const RETURN_OK: &str = "600";
+const RETURN_SIGNED_OUT: &str = "699";
+/// Espera máxima do `Signout` pelo fim do túnel, dentro do prazo do logout da sessão.
+const SIGNOUT_WAITS_TUNNEL: Duration = Duration::from_millis(500);
 
 #[derive(Default, Clone)]
 pub struct CheckpointOptions {
@@ -80,6 +86,8 @@ struct Shared {
     send_disconnect: Notify,
     /// O túnel da sessão chegou ao `hello_reply`.
     tunnel_opened: AtomicBool,
+    /// Há um túnel com a leitura em curso.
+    tunnel_live: AtomicBool,
     /// Pedidos do canal de controle e `disconnect` do cliente pelo túnel, na ordem em que chegaram.
     requests: Mutex<Vec<Sexp>>,
     from_client: mpsc::UnboundedSender<Vec<u8>>,
@@ -113,6 +121,7 @@ impl FakeCheckpoint {
             stop_reading: Notify::new(),
             send_disconnect: Notify::new(),
             tunnel_opened: AtomicBool::new(false),
+            tunnel_live: AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             from_client: from_tx,
             to_client: Mutex::new(Some(to_rx)),
@@ -173,6 +182,17 @@ impl FakeCheckpoint {
         self.shared.requests.lock().unwrap().clone()
     }
 
+    /// O `disconnect` do cliente pelo túnel, esperando até 1 s por ele.
+    pub async fn farewell(&self) -> Option<Sexp> {
+        for _ in 0..100 {
+            if let Some(f) = self.requests().into_iter().find(|r| r.name() == Some("disconnect")) {
+                return Some(f);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        None
+    }
+
     /// Manda um pacote IP ao cliente pelo túnel.
     pub fn send_ip(&self, packet: Vec<u8>) {
         self.to_client.send(packet).unwrap();
@@ -201,14 +221,21 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
         let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n").await;
         return;
     };
-    shared.requests.lock().unwrap().push(body.clone());
     let kind = body.text("RequestHeader:type").unwrap_or_default().to_string();
+    if kind == "Signout" {
+        let waited = tokio::time::Instant::now();
+        while shared.tunnel_live.load(Ordering::SeqCst) && waited.elapsed() < SIGNOUT_WAITS_TUNNEL {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+    shared.requests.lock().unwrap().push(body.clone());
     let reply = match kind.as_str() {
         "ClientHello" => server_info(&shared.options),
-        "UserPass" if shared.options.no_authn_status => response("UserPass", "", &format!("\t\t:session_id ({})", AUTH_SESSION)),
+        "UserPass" if shared.options.no_authn_status => response("UserPass", "", RETURN_OK, &format!("\t\t:session_id ({})", AUTH_SESSION)),
         "UserPass" if body.text("RequestData:selectedLoginOption") == Some(LOGIN_OPTION) => response(
             "UserPass",
             "",
+            RETURN_OK,
             &format!("\t\t:authn_status (continue)\n\t\t:session_id ({})\n\t\t:prompt ({})", AUTH_SESSION, sexp::obfuscate(IDP_URL.as_bytes())),
         ),
         "MultiChallange" => {
@@ -226,7 +253,7 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
             } else {
                 format!("\t\t:authn_status (done)\n\t\t:is_authenticated (false)\n\t\t:error_message ({})", sexp::obfuscate(b"Authentication failed"))
             };
-            response("MultiChallange", AUTH_SESSION, &data)
+            response("MultiChallange", AUTH_SESSION, RETURN_OK, &data)
         }
         "ClientSettings" if !shared.options.refuse_client_settings && body.text("RequestHeader:session_id") == Some(SESSION_ID) => {
             let ranges = shared.options.settings_ranges.clone().unwrap_or_else(|| RANGES.iter().copied().chain([GATEWAY_RANGE]).collect());
@@ -235,36 +262,33 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
             response(
                 "ClientSettings",
                 SESSION_ID,
+                RETURN_OK,
                 &format!("\t\t:gw_internal_ip (10.1.0.1)\n\t\t:updated_policies (\n\t\t\t:range (\n\t\t\t\t:settings ({})\n\t\t\t\t:name (range)))", settings),
             )
         }
-        "ClientSettings" => response("ClientSettings", SESSION_ID, "").replace(":return_code (600)", ":return_code (1)"),
+        "ClientSettings" => response("ClientSettings", SESSION_ID, "1", ""),
         "Signout" if body.text("RequestHeader:session_id") == Some(SESSION_ID) => {
             shared.logouts.fetch_add(1, Ordering::SeqCst);
             if shared.options.mute_logout {
                 let _ = stream.read(&mut [0u8; 1]).await; // segura a conexão até o cliente desistir
                 return;
             }
-            let signout = response("Signout", SESSION_ID, "");
             // O gateway de validação responde 699 ao Signout depois do túnel: a sessão já acabou.
-            if shared.tunnel_opened.load(Ordering::SeqCst) {
-                signout.replace(":return_code (600)", ":return_code (699)")
-            } else {
-                signout
-            }
+            let code = if shared.tunnel_opened.load(Ordering::SeqCst) { RETURN_SIGNED_OUT } else { RETURN_OK };
+            response("Signout", SESSION_ID, code, "")
         }
-        _ => response(&kind, "", "\t\t:authn_status (failed)"),
+        _ => response(&kind, "", RETURN_OK, "\t\t:authn_status (failed)"),
     };
     let http = format!("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply);
     let _ = stream.write_all(http.as_bytes()).await;
     let _ = stream.shutdown().await;
 }
 
-fn response(kind: &str, session_id: &str, data: &str) -> String {
+fn response(kind: &str, session_id: &str, code: &str, data: &str) -> String {
     let data = if data.is_empty() { "()".to_string() } else { format!("(\n{})", data) };
     format!(
-        "(CCCserverResponse\n\t:ResponseHeader (\n\t\t:id (1)\n\t\t:type ({})\n\t\t:session_id ({})\n\t\t:return_code (600))\n\t:ResponseData {})\n",
-        kind, session_id, data
+        "(CCCserverResponse\n\t:ResponseHeader (\n\t\t:id (1)\n\t\t:type ({})\n\t\t:session_id ({})\n\t\t:return_code ({}))\n\t:ResponseData {})\n",
+        kind, session_id, code, data
     )
 }
 
@@ -285,6 +309,7 @@ fn server_info(options: &CheckpointOptions) -> String {
     response(
         "ClientHello",
         "",
+        RETURN_OK,
         &format!(
             "\t\t:protocol_version (\n\t\t\t:protocol_version (100))\n\
              \t\t:connectivity_info (\n\t\t\t:client_enabled (true)\n\
@@ -347,6 +372,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
     }
     let _ = wr.write_all(&control(&hello_reply(&shared.options))).await;
     shared.tunnel_opened.store(true, Ordering::SeqCst);
+    shared.tunnel_live.store(true, Ordering::SeqCst);
 
     let (frames_tx, mut frames) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
     let reader = shared.clone();
@@ -355,16 +381,24 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
             let mut len = [0u8; 4];
             tokio::select! {
                 r = rd.read_exact(&mut len) => if r.is_err() {
-                    return;
+                    break;
                 },
                 // Segura o stream aberto e nunca mais lê.
                 _ = reader.stop_reading.notified() => std::future::pending::<()>().await,
             }
-            let Some(f) = read_frame(&mut rd, u32::from_be_bytes(len)).await else { return };
+            let Some(f) = read_frame(&mut rd, u32::from_be_bytes(len)).await else { break };
+            // Registrado na leitura, antes do fim do túnel que o `Signout` espera.
+            if f.0 == CONTROL {
+                let text = sexp::parse(&String::from_utf8_lossy(&f.1)).expect("control frame is not an S-expression");
+                if text.name() == Some("disconnect") {
+                    reader.requests.lock().unwrap().push(text);
+                }
+            }
             if frames_tx.send(f).is_err() {
-                return;
+                break;
             }
         }
+        reader.tunnel_live.store(false, Ordering::SeqCst);
     });
     let mut to_client = shared.to_client.lock().unwrap().take().expect("one tunnel at a time");
     loop {
@@ -373,9 +407,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
                 Some((DATA, packet)) => { let _ = shared.from_client.send(packet); }
                 Some((CONTROL, text)) => {
                     let text = sexp::parse(&String::from_utf8_lossy(&text)).expect("control frame is not an S-expression");
-                    if text.name() == Some("disconnect") {
-                        shared.requests.lock().unwrap().push(text);
-                    } else if text.name() == Some("keepalive") {
+                    if text.name() == Some("keepalive") {
                         let n = shared.keepalives.fetch_add(1, Ordering::SeqCst);
                         if shared.options.keepalive_answers.is_none_or(|answers| n < answers) {
                             let _ = wr.write_all(&control("(keepalive\n\t:id (0))")).await;
@@ -391,7 +423,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
                 break;
             }
             _ = shared.send_disconnect.notified() => {
-                let _ = wr.write_all(&control("(disconnect\n\t:code (28)\n\t:message (\"Session terminated\"))")).await;
+                let _ = wr.write_all(&control(&format!("(disconnect\n\t:code ({})\n\t:message (\"Session terminated\"))", DISCONNECT_CODE))).await;
             }
         }
     }

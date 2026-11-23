@@ -9,7 +9,7 @@ use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinSet;
 
 use crate::checkpoint::CheckPoint;
-use crate::engine::{Credentials, Engine, LoginError, Tuning, Waiting};
+use crate::engine::{Credentials, Engine, LoginError, Tuning, Tunnel, Waiting};
 use crate::fortinet::Fortinet;
 use crate::net::{self, Os, Packets};
 use crate::profile::{EngineKind, Profile};
@@ -17,9 +17,10 @@ use crate::tls::{CertTrust, GatewayTls};
 use crate::LogFn;
 
 const GOOGLE_DNS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];
-/// Prazo do logout no disconnect pedido pelo usuário: gateway mudo não segura a desconexão.
+/// Prazo do logout no disconnect pedido pelo usuário, despedida pelo túnel inclusive: gateway
+/// mudo não segura a desconexão.
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(2);
-/// Prazo da despedida pelo túnel antes de abortá-lo: TCP meio aberto não segura a desconexão.
+/// Parte do `LOGOUT_TIMEOUT` da despedida pelo túnel antes de abortá-lo: TCP meio aberto não a segura.
 const TUNNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Resolução da velocidade que a GUI calcula; mais curto pesa sem ganho visível.
@@ -398,14 +399,14 @@ impl Session {
         let opened = tokio::select! {
             r = engine.open_tunnel(login_started) => r,
             _ = cancel.notified() => {
-                self.logout(engine).await;
+                self.logout(engine, LOGOUT_TIMEOUT).await;
                 return End::Stopped;
             }
         };
         let (mut config, packets, mut tunnel) = match opened {
             Ok(t) => t,
             Err(e) => {
-                self.logout(engine).await;
+                self.logout(engine, LOGOUT_TIMEOUT).await;
                 return End::Failed(e);
             }
         };
@@ -439,9 +440,7 @@ impl Session {
                 config.dns_suffixes.clear();
             }
             Err(e) => {
-                self.teardown();
-                tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
-                self.logout(engine).await;
+                self.finish(tunnel, engine, true).await;
                 return End::Failed(e);
             }
         }
@@ -461,9 +460,7 @@ impl Session {
             inner.stopping
         };
         if stopped {
-            tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
-            self.teardown();
-            self.logout(engine).await;
+            self.finish(tunnel, engine, true).await;
             return End::Stopped;
         }
         let events = self.events.clone();
@@ -494,13 +491,9 @@ impl Session {
                 }
             }
         };
-        tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
-        self.teardown();
         // Sem logout na queda nem na expiração: o gateway não responde ou já encerrou a sessão,
         // e o prazo do logout só atrasaria o `disconnected`.
-        if let End::Stopped = end {
-            self.logout(engine).await;
-        }
+        self.finish(tunnel, engine, matches!(end, End::Stopped)).await;
         end
     }
 
@@ -530,8 +523,19 @@ impl Session {
         }
     }
 
-    async fn logout<E: Engine>(&self, engine: &E) {
-        match tokio::time::timeout(LOGOUT_TIMEOUT, engine.logout()).await {
+    /// Fecha o túnel (com despedida), desfaz a rede e, com `logout`, encerra a sessão no gateway.
+    /// Despedida e logout dividem o `LOGOUT_TIMEOUT`.
+    async fn finish<E: Engine>(&self, tunnel: Tunnel, engine: &E, logout: bool) {
+        let started = tokio::time::Instant::now();
+        tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
+        self.teardown();
+        if logout {
+            self.logout(engine, LOGOUT_TIMEOUT.saturating_sub(started.elapsed())).await;
+        }
+    }
+
+    async fn logout<E: Engine>(&self, engine: &E, deadline: Duration) {
+        match tokio::time::timeout(deadline, engine.logout()).await {
             Ok(Ok(())) => self.log("logged out"),
             Ok(Err(e)) => self.log(format!("logout failed: {}", e)),
             Err(_) => self.log("logout timed out"),

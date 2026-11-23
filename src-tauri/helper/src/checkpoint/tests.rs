@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 
 use crate::engine::Tuning;
 use crate::net::Route;
+use crate::checkpoint::slim::DISCONNECT_CODE;
 use crate::session::Session;
 use crate::testing::fake_checkpoint::*;
 use crate::testing::fake_gateway::{FakeGateway, GatewayOptions, PASSWORD, PROFILE_ID};
@@ -177,11 +178,22 @@ async fn refused_client_settings_without_hello_ranges_fails_the_connect_and_sign
     let gw = FakeCheckpoint::start(CheckpointOptions { refuse_client_settings: true, ..Default::default() }).await;
     let (mut c, os) = waiting(&gw, Tuning::default()).await;
     assert!(browser(gw.login_port, &format!("GET /{}", IDP_CODE)).await.starts_with("HTTP/1.1 200 OK"));
-    let state = next_state(&mut c).await;
+    let mut lines = Vec::new();
+    let state = loop {
+        let v = c.recv().await.expect("server closed the connection");
+        match v["line"].as_str() {
+            Some(l) => lines.push(l.to_string()),
+            None if v["event"] == "state" => break v,
+            None => {}
+        }
+    };
     assert_eq!(state["state"], "disconnected", "{}", state);
     assert!(state["reason"].as_str().unwrap().contains("Could not get the network ranges from the gateway"), "{}", state);
     assert!(os.calls().is_empty(), "{:?}", os.calls());
     assert_eq!(gw.logouts(), 1);
+    // Sem despedida pelo túnel, o 699 do `Signout` continua falha do logout.
+    assert!(gw.farewell().await.is_none());
+    assert!(lines.iter().any(|l| l.starts_with("logout failed") && l.contains("699")), "{:?}", lines);
 }
 
 #[tokio::test]
@@ -309,10 +321,10 @@ async fn disconnect_signs_out_at_the_gateway_and_tears_everything_down() {
     assert_eq!(state, json!({"v": 2, "type": "event", "event": "state", "state": "disconnected"}));
     assert_eq!(gw.logouts(), 1);
     // Como o cpyvpn: `disconnect` pelo túnel antes do `Signout`, que o gateway responde com 699.
+    // O falso só registra o `Signout` depois do fim do túnel, e o `disconnect` na leitura dele.
     let tail: Vec<_> = gw.requests().iter().rev().take(2).map(|r| r.text("RequestHeader:type").or(r.name()).unwrap_or_default().to_string()).collect();
     assert_eq!(tail, ["Signout", "disconnect"]);
-    let farewell = gw.requests().into_iter().find(|r| r.name() == Some("disconnect")).unwrap();
-    assert_eq!(farewell.text("code"), Some("28"));
+    assert_eq!(gw.farewell().await.unwrap().text("code"), Some(DISCONNECT_CODE));
     assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
     assert_eq!(os.saved_state(), None);
     assert!(os.calls().contains(&OsCall::Down) && os.calls().contains(&OsCall::RemoveDns));
@@ -325,6 +337,28 @@ async fn mute_gateway_on_signout_does_not_hold_the_disconnect() {
     let (path, os) = start(&gw, None).await;
     let mut c = client(&path).await;
     idp_connect(&mut c, &gw, gw.profile()).await;
+    let started = Instant::now();
+    let state = disconnect(&mut c).await;
+    assert!(started.elapsed() < Duration::from_millis(2500), "took {:?}", started.elapsed());
+    assert!(state.get("reason").is_none(), "{}", state);
+    assert_eq!(gw.logouts(), 1);
+    assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
+}
+
+/// Pior caso da user story 32 da #43: despedida travada num túnel que o gateway parou de ler e
+/// `Signout` sem resposta. Despedida e logout dividem o prazo do logout, como antes da despedida.
+#[tokio::test]
+async fn stuck_farewell_and_mute_signout_do_not_hold_the_disconnect() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions { mute_logout: true, ..Default::default() }).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    idp_connect(&mut c, &gw, gw.profile()).await;
+    let iface = os.take_packets();
+    gw.stop_reading();
+    // Tráfego até o buffer de envio encher; a despedida fica atrás dele.
+    tokio::spawn(async move { while iface.tx.send(vec![0x45; 1300]).await.is_ok() {} });
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let started = Instant::now();
     let state = disconnect(&mut c).await;
     assert!(started.elapsed() < Duration::from_millis(2500), "took {:?}", started.elapsed());
@@ -769,6 +803,8 @@ async fn short_auth_timeout_warns_and_then_expires_the_session() {
     let state = c.recv_skipping_logs().await;
     assert_dropped(&state, &os, "expired", "Session expired");
     assert_eq!(gw.logouts(), 0);
+    // Na expiração o túnel ainda está de pé: a despedida sai, sem `Signout`.
+    assert_eq!(gw.farewell().await.unwrap().text("code"), Some(DISCONNECT_CODE));
 }
 
 /// Relógio de parede adiantável: `skew` segundos à frente do real.

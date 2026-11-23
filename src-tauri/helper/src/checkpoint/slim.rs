@@ -2,6 +2,7 @@
 //! S-expression (`client_hello`, `hello_reply`, `keepalive`, `disconnect`) e dados com o pacote IP cru.
 
 use std::net::Ipv4Addr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -83,21 +84,30 @@ fn keepalive() -> Vec<u8> {
     control(&Sexp::obj("keepalive", vec![("id", Sexp::val("0"))]))
 }
 
-/// A despedida do cliente: `disconnect` com o código 28, o mesmo que o gateway usa ao encerrar a sessão.
-pub fn disconnect() -> Vec<u8> {
-    control(&Sexp::obj("disconnect", vec![("code", Sexp::val("28")), ("message", Sexp::val("User disconnected"))]))
+/// Código do `disconnect` da despedida do cliente, o mesmo que o gateway usa ao encerrar a sessão.
+pub const DISCONNECT_CODE: &str = "28";
+
+/// A despedida do túnel: `stop` a pede e `sent` diz se o `disconnect` saiu.
+#[derive(Default)]
+pub struct Farewell {
+    pub stop: Arc<Notify>,
+    pub sent: AtomicBool,
+}
+
+fn disconnect() -> Vec<u8> {
+    control(&Sexp::obj("disconnect", vec![("code", Sexp::val(DISCONNECT_CODE)), ("message", Sexp::val("User disconnected"))]))
 }
 
 /// Conduz o túnel até ele cair e devolve o motivo. Pacotes IP fluem entre o stream e o canal da
 /// interface, e um `keepalive` sai a cada `interval` e a cada `probe`. Três intervalos seguidos
-/// sem resposta ao keepalive derrubam o túnel. `stop` encerra a sessão: manda o `disconnect`,
-/// fecha o TLS e termina.
+/// sem resposta ao keepalive derrubam o túnel. `farewell.stop` encerra a sessão: manda o
+/// `disconnect`, marca `farewell.sent`, fecha o TLS e termina.
 pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     mut buf: Vec<u8>,
     interval: Duration,
     probe: Arc<Notify>,
-    stop: Arc<Notify>,
+    farewell: Arc<Farewell>,
     to_iface: mpsc::Sender<Vec<u8>>,
     mut from_iface: mpsc::Receiver<Vec<u8>>,
 ) -> String {
@@ -142,8 +152,10 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
                 keepalive()
             }
             _ = probe.notified() => keepalive(),
-            _ = stop.notified() => {
-                let _ = write(&mut stream, &disconnect(), deadline).await;
+            _ = farewell.stop.notified() => {
+                if write(&mut stream, &disconnect(), deadline).await.is_ok() {
+                    farewell.sent.store(true, Ordering::SeqCst);
+                }
                 let _ = stream.shutdown().await;
                 return "Tunnel closed by the client".into();
             }

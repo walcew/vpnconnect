@@ -3,7 +3,7 @@
 //! `docs/checkpoint-protocol.md`.
 
 pub mod sexp;
-mod slim;
+pub(crate) mod slim;
 #[cfg(test)]
 mod tests;
 
@@ -45,7 +45,7 @@ const MAX_ERROR_MESSAGE: usize = 200;
 const CLIENT_TYPE: &str = "TRAC";
 /// Retorno de sucesso no cabeçalho das respostas do canal de controle.
 const RETURN_OK: &str = "600";
-/// Retorno do `Signout` depois que o túnel fechou: a sessão já não existe no gateway.
+/// Retorno do `Signout` depois da despedida pelo túnel: a sessão já não existe no gateway.
 const RETURN_SIGNED_OUT: &str = "699";
 const MAX_LOGIN_OPTION_LEN: usize = 64;
 /// Tetos das faixas de rede anunciadas e das rotas que elas viram.
@@ -82,6 +82,8 @@ pub struct CheckPoint {
     keepalive: Option<Duration>,
     next_id: AtomicU32,
     session: Option<GatewaySession>,
+    /// A despedida do túnel aberto, que o `logout` consulta.
+    farewell: Arc<slim::Farewell>,
     log: LogFn,
 }
 
@@ -104,12 +106,23 @@ impl CheckPoint {
             keepalive: tuning.keepalive,
             next_id: AtomicU32::new(1),
             session: None,
+            farewell: Arc::default(),
             log,
         })
     }
 
     /// Um pedido do canal de controle; devolve o `ResponseData` de uma resposta com retorno 600.
     async fn request(&self, kind: &str, session_id: &str, data: Sexp) -> Result<Sexp, String> {
+        let reply = self.reply(kind, session_id, data).await?;
+        let code = return_code(&reply);
+        if code != RETURN_OK {
+            return Err(refused(kind, code));
+        }
+        reply.get("ResponseData").cloned().ok_or_else(|| format!("Gateway answer to {} has no data", kind))
+    }
+
+    /// A `CCCserverResponse` inteira de um pedido, com qualquer retorno.
+    async fn reply(&self, kind: &str, session_id: &str, data: Sexp) -> Result<Sexp, String> {
         tokio::time::timeout(STEP_TIMEOUT, self.exchange(kind, session_id, data))
             .await
             .map_err(|_| format!("Gateway request {} timed out", kind))?
@@ -138,17 +151,10 @@ impl CheckPoint {
             return Err(format!("Gateway refused the request {} (HTTP {})", kind, resp.status));
         }
         let reply = sexp::parse(&String::from_utf8_lossy(&resp.body)).map_err(|e| format!("Invalid gateway answer to {}: {}", kind, e))?;
-        let code = reply.text("ResponseHeader:return_code").unwrap_or_default();
-        // O gateway de validação responde 699 ao `Signout` depois do túnel fechado, como o snx-rs e o
-        // cpyvpn também viam: quem encerra a sessão é o `disconnect` do túnel.
-        if kind == "Signout" && code == RETURN_SIGNED_OUT {
-            (self.log)(format!("Signout answered with return code {}: the gateway had already closed the session", code));
-            return Ok(Sexp::val(""));
+        if reply.name() != Some("CCCserverResponse") {
+            return Err(format!("Invalid gateway answer to {}: not a CCCserverResponse", kind));
         }
-        if reply.name() != Some("CCCserverResponse") || code != RETURN_OK {
-            return Err(format!("Gateway answered the request {} with return code {:?}", kind, code));
-        }
-        reply.get("ResponseData").cloned().ok_or_else(|| format!("Gateway answer to {} has no data", kind))
+        Ok(reply)
     }
 
     /// Escolhe a opção de login nas informações do servidor; falha se o gateway não oferece o túnel SSL.
@@ -378,8 +384,8 @@ impl engine::Engine for CheckPoint {
 
         let (to_iface, rx) = mpsc::channel(256);
         let (tx, from_iface) = mpsc::channel(256);
-        let (probe, stop) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
-        let task = tokio::spawn(slim::run(stream, buf, keepalive, probe.clone(), stop.clone(), to_iface, from_iface));
+        let probe = Arc::new(Notify::new());
+        let task = tokio::spawn(slim::run(stream, buf, keepalive, probe.clone(), self.farewell.clone(), to_iface, from_iface));
         let config = TunnelConfig {
             gateway,
             ip,
@@ -392,11 +398,29 @@ impl engine::Engine for CheckPoint {
             mtu: DEFAULT_MTU,
             expires_at: auth_timeout.map(|s| login_started + chrono::Duration::seconds(s as i64)),
         };
-        Ok((config, Packets { tx, rx }, Tunnel::new(task, probe).with_stop(stop)))
+        Ok((config, Packets { tx, rx }, Tunnel::new(task, probe).with_stop(self.farewell.stop.clone())))
     }
 
     async fn logout(&self) -> Result<(), String> {
         let session = self.session.as_ref().ok_or("Not logged in")?;
-        self.request("Signout", &session.id, Sexp::val("")).await.map(|_| ())
+        let reply = self.reply("Signout", &session.id, Sexp::val("")).await?;
+        match return_code(&reply) {
+            RETURN_OK => Ok(()),
+            // Depois do `disconnect` pelo túnel o gateway de validação responde 699, como o snx-rs e o
+            // cpyvpn também viam. Sem a despedida (túnel que não abriu, cancelamento) o 699 segue erro.
+            code @ RETURN_SIGNED_OUT if self.farewell.sent.load(Ordering::SeqCst) => {
+                (self.log)(format!("Signout answered with return code {}: the tunnel disconnect already ended the session", code));
+                Ok(())
+            }
+            code => Err(refused("Signout", code)),
+        }
     }
+}
+
+fn return_code(reply: &Sexp) -> &str {
+    reply.text("ResponseHeader:return_code").unwrap_or_default()
+}
+
+fn refused(kind: &str, code: &str) -> String {
+    format!("Gateway answered the request {} with return code {:?}", kind, code)
 }
