@@ -882,7 +882,7 @@ fn profile_show_prints_every_field_but_never_the_password_or_extra_args() {
     assert_eq!(json_out(&out), json!({
         "id": "p1", "name": "Corp", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth": "password",
         "username": "alice", "realm": "corp", "otp_required": true, "auto_trust": true,
-        "trusted_certs": [DIGEST], "dns_domains": ["corp.example.com"], "has_password": true,
+        "trusted_certs": [DIGEST], "dns_domains": ["corp.example.com"], "routes": [], "has_password": true,
     }));
     let human = home.run(&["profile", "show", "p1"]);
     let human = text(&human.stdout);
@@ -1256,7 +1256,7 @@ fn settings_set_refuses_an_unknown_key_or_value() {
 #[test]
 fn a_profile_created_by_the_cli_connects() {
     let home = Home::new();
-    home.run(&["profile", "add", "--name", "Fresh", "--host", "fresh.example.com", "--username", "bob", "--dns-domain", "corp.example.com"]);
+    home.run(&["profile", "add", "--name", "Fresh", "--host", "fresh.example.com", "--username", "bob", "--dns-domain", "corp.example.com", "--route", "10.0.0.0/8"]);
     home.run_with_stdin(&["profile", "set-password", "Fresh", "--password-stdin"], "pw\n");
     let helper = FakeHelper::idle(&home.socket(), vec![connected_event()]);
 
@@ -1266,7 +1266,129 @@ fn a_profile_created_by_the_cli_connects() {
     let request = connect_request(&helper);
     assert_eq!(request["profile"]["host"], "fresh.example.com");
     assert_eq!(request["profile"]["dns_match_domains"], json!(["corp.example.com"]));
+    assert_eq!(request["profile"]["tunnel_routes"], json!(["10.0.0.0/8"]));
     assert_eq!(request["password"], "pw");
+}
+
+#[test]
+fn profile_add_stores_the_networks_as_cidr_and_shows_them_as_routes() {
+    let home = Home::new();
+
+    let out = home.run(&["profile", "add", "--name", "Split", "--host", "h", "--route", " 10.1.2.3/8", "--route", "192.0.2.7", "--route", "10.0.0.0/8", "--json"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(home.stored_profiles()[0]["tunnel_routes"], json!(["10.0.0.0/8", "192.0.2.7/32"]));
+    assert_eq!(json_out(&out)["routes"], json!(["10.0.0.0/8", "192.0.2.7/32"]));
+    let human = text(&home.run(&["profile", "show", "Split"]).stdout);
+    assert!(human.contains("routes:") && human.contains("10.0.0.0/8, 192.0.2.7/32"), "{human}");
+}
+
+#[test]
+fn a_profile_without_networks_keeps_no_routes_field_in_the_file() {
+    let home = Home::new();
+    home.run(&["profile", "add", "--name", "Plain", "--host", "h"]);
+    assert!(home.stored_profiles()[0].get("tunnel_routes").is_none(), "{}", home.stored_profiles());
+}
+
+#[test]
+fn invalid_routes_are_refused_and_nothing_is_saved() {
+    let home = Home::new();
+    for bad in ["0.0.0.0/0", "10.0.0.0/33", "intranet", "10.0.0/8"] {
+        assert_refused(&home.run(&["profile", "add", "--name", "x", "--host", "h", "--route", "10.0.0.0/8", "--route", bad, "--json"]), 1, "INVALID_ROUTE");
+    }
+    assert!(!home.0.join("profiles.json").exists());
+
+    home.profiles(json!([full_profile()]));
+    let before = std::fs::read(home.0.join("profiles.json")).unwrap();
+    assert_refused(&home.run(&["profile", "edit", "Corp", "--port", "1234", "--route", "0.0.0.0/0", "--json"]), 1, "INVALID_ROUTE");
+    assert_eq!(std::fs::read(home.0.join("profiles.json")).unwrap(), before);
+}
+
+#[test]
+fn profile_edit_replaces_and_clears_the_routes() {
+    let home = Home::new();
+    home.profiles(json!([full_profile()]));
+
+    home.run(&["profile", "edit", "Corp", "--route", "10.0.0.0/8"]);
+    let out = home.run(&["profile", "edit", "Corp", "--route", "172.16.0.0/12", "--route", "192.168.50.0/24", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(home.stored_profiles()[0]["tunnel_routes"], json!(["172.16.0.0/12", "192.168.50.0/24"]));
+    // Mexer em outro campo mantém as redes.
+    home.run(&["profile", "edit", "Corp", "--port", "8443"]);
+    assert_eq!(home.stored_profiles()[0]["tunnel_routes"], json!(["172.16.0.0/12", "192.168.50.0/24"]));
+
+    let out = home.run(&["profile", "edit", "Corp", "--clear-routes", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(json_out(&out)["routes"], json!([]));
+    assert!(home.stored_profiles()[0].get("tunnel_routes").is_none());
+    assert_refused(&home.run(&["profile", "edit", "Corp", "--clear-routes", "--route", "10.0.0.0/8", "--json"]), 255, "INVALID_ARGUMENT");
+}
+
+#[test]
+fn profile_help_explains_the_routes_and_their_refusal() {
+    let out = Home::new().run(&["profile", "--help"]);
+    let help = text(&out.stdout);
+    assert!(help.contains("\"routes\"") && help.contains("INVALID_ROUTE") && help.contains("full tunnel"), "{help}");
+    let out = Home::new().run(&["profile", "edit", "--help"]);
+    let help = text(&out.stdout);
+    assert!(help.contains("--route <CIDR>") && help.contains("--clear-routes"), "{help}");
+}
+
+fn full_tunnel(connected: Value) -> Value {
+    let mut state = connected;
+    state["full_tunnel"] = json!(true);
+    state
+}
+
+#[test]
+fn status_warns_that_a_full_tunnel_session_sends_all_traffic_through_the_vpn() {
+    let home = Home::new();
+    home.profiles(json!([profile("p1", "Corp")]));
+    let _helper = FakeHelper::with_state(&home.socket(), full_tunnel(connected()));
+
+    let out = home.run(&["status"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    assert!(stdout.contains("Full tunnel:") && stdout.contains("yes: all of this machine's traffic goes through the VPN"), "{stdout}");
+
+    let out = home.run(&["status", "--json"]);
+    assert_eq!(json_out(&out)["full_tunnel"], true);
+}
+
+#[test]
+fn status_of_a_split_session_says_it_is_not_full_tunnel() {
+    let home = Home::new();
+    home.profiles(json!([profile("p1", "Corp")]));
+    let mut split = connected();
+    split["full_tunnel"] = json!(false);
+    let _helper = FakeHelper::with_state(&home.socket(), split);
+
+    let stdout = text(&home.run(&["status"]).stdout);
+    assert!(stdout.contains("Full tunnel:") && stdout.contains("no"), "{stdout}");
+    assert!(!stdout.contains("all of this machine's traffic"), "{stdout}");
+}
+
+#[test]
+fn connect_in_full_tunnel_warns_on_stderr_and_still_succeeds() {
+    let home = home_with_corp(&[]);
+    let _helper = FakeHelper::idle(&home.socket(), vec![state(full_tunnel(connected()))]);
+
+    let out = home.run(&["connect", "Corp", "--json"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let stderr = text(&out.stderr);
+    assert!(stderr.contains("full tunnel: all of this machine's traffic goes through the VPN"), "{stderr}");
+    assert!(stderr.contains("vpnconnect profile edit p1 --route <CIDR>"), "{stderr}");
+    assert_eq!(json_out(&out)["full_tunnel"], true);
+}
+
+#[test]
+fn connect_in_split_tunnel_prints_no_full_tunnel_warning() {
+    let home = home_with_corp(&[]);
+    let _helper = FakeHelper::idle(&home.socket(), vec![connected_event()]);
+    let out = home.run(&["connect", "Corp", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(!text(&out.stderr).contains("full tunnel"), "{}", text(&out.stderr));
 }
 
 /// O campo `name:` da saída de texto de `helper status`, sem o espaço que o alinha.

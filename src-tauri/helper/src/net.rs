@@ -23,6 +23,66 @@ pub struct Route {
     pub mask: Ipv4Addr,
 }
 
+/// Máximo de redes pela VPN num Profile; acima disso é engano, não configuração.
+pub const MAX_TUNNEL_ROUTES: usize = 256;
+
+impl Route {
+    /// Lê `a.b.c.d/n` (n de 1 a 32) ou um endereço sozinho (/32), zerando os bits de host.
+    /// A /0 é recusada: full tunnel não é algo que o Profile peça.
+    pub fn parse_cidr(text: &str) -> Result<Route, String> {
+        let invalid = || format!("Invalid tunnel route: {}", text);
+        let (addr, len) = match text.split_once('/') {
+            Some((addr, len)) if !len.is_empty() && len.bytes().all(|b| b.is_ascii_digit()) => {
+                (addr, len.parse::<u32>().map_err(|_| invalid())?)
+            }
+            Some(_) => return Err(invalid()),
+            None => (text, 32),
+        };
+        let addr: Ipv4Addr = addr.parse().map_err(|_| invalid())?;
+        if !(1..=32).contains(&len) {
+            return Err(invalid());
+        }
+        let mask = u32::MAX << (32 - len);
+        Ok(Route { addr: Ipv4Addr::from(u32::from(addr) & mask), mask: Ipv4Addr::from(mask) })
+    }
+
+    /// O intervalo `[início, fim)` de endereços da rede; `None` com máscara não contígua.
+    fn range(&self) -> Option<(u64, u64)> {
+        let mask = u32::from(self.mask);
+        (mask.leading_ones() + mask.trailing_zeros() == 32).then(|| {
+            let start = u64::from(u32::from(self.addr) & mask);
+            (start, start + u64::from(!mask) + 1)
+        })
+    }
+}
+
+impl std::fmt::Display for Route {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mask = u32::from(self.mask);
+        if mask.leading_ones() + mask.trailing_zeros() == 32 {
+            write!(f, "{}/{}", self.addr, mask.leading_ones())
+        } else {
+            write!(f, "{}/{}", self.addr, self.mask)
+        }
+    }
+}
+
+/// As redes pela VPN de um Profile, validadas; a primeira inválida recusa todas.
+pub fn parse_tunnel_routes(routes: &[String]) -> Result<Vec<Route>, String> {
+    let mut parsed: Vec<Route> = Vec::new();
+    for text in routes {
+        let route = Route::parse_cidr(text.trim())?;
+        if !parsed.contains(&route) {
+            parsed.push(route);
+        }
+    }
+    // Conta depois de tirar as repetidas, como o app faz ao salvar o Profile.
+    if parsed.len() > MAX_TUNNEL_ROUTES {
+        return Err(format!("Too many tunnel routes: {} (at most {})", parsed.len(), MAX_TUNNEL_ROUTES));
+    }
+    Ok(parsed)
+}
+
 /// O que o Engine negociou e a camada de rede precisa aplicar.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TunnelConfig {
@@ -61,7 +121,9 @@ pub trait Os: Send + Sync {
     /// Leva o /32 do gateway para o default atual sem removê-lo antes (o tráfego do gateway nunca
     /// cai no túnel); cria se ele não existir. Devolve o next-hop usado.
     fn move_gateway_route(&self, gateway: IpAddr) -> Result<IpAddr, String>;
-    fn set_dns(&self, servers: &[Ipv4Addr], suffixes: &[String]) -> Result<(), String>;
+    /// `global`: os servidores respondem por todos os nomes, e os sufixos ficam só como domínios de
+    /// busca. Sem ele, respondem só pelos sufixos (ou por tudo, sem sufixos).
+    fn set_dns(&self, servers: &[Ipv4Addr], suffixes: &[String], global: bool) -> Result<(), String>;
     fn remove_dns(&self);
     /// Remove o /32 só se ele ainda sai por `via`: outro software pode ter um /32 do mesmo IP.
     fn remove_gateway_route(&self, gateway: IpAddr, via: IpAddr);
@@ -170,7 +232,9 @@ pub fn apply(os: &dyn Os, config: &TunnelConfig, packets: Packets, applied: &Mut
         os.add_route(route)?;
     }
     if !config.dns_servers.is_empty() {
-        match os.set_dns(&config.dns_servers, &config.dns_suffixes) {
+        // Em full tunnel o DNS do sistema também sai pelo túnel, e o gateway pode bloquear DNS
+        // externo: o da VPN resolve todos os nomes. Restringir aos sufixos só vale em split tunnel.
+        match os.set_dns(&config.dns_servers, &config.dns_suffixes, is_full_tunnel(config)) {
             Ok(()) => record(os, applied, |a| a.dns = true),
             Err(e) => return Ok(Some(format!("DNS setup failed, tunnel stays up without DNS: {}", e))),
         }
@@ -198,6 +262,36 @@ fn tunnel_routes(config: &TunnelConfig) -> Vec<Route> {
         .iter()
         .flat_map(|r| if r.mask.is_unspecified() { FULL_TUNNEL.to_vec() } else { vec![*r] })
         .collect()
+}
+
+/// A sessão leva todo o tráfego IPv4 da máquina: a união das rotas pelo túnel cobre o espaço de
+/// endereços inteiro, venha do full tunnel, de uma default do gateway ou de várias redes que,
+/// somadas, cobrem tudo.
+pub fn is_full_tunnel(config: &TunnelConfig) -> bool {
+    let mut ranges: Vec<(u64, u64)> = tunnel_routes(config).iter().filter_map(Route::range).collect();
+    ranges.sort_unstable();
+    let mut covered = 0u64;
+    for (start, end) in ranges {
+        if start > covered {
+            return false;
+        }
+        covered = covered.max(end);
+    }
+    covered == 1 << 32
+}
+
+/// As rotas pelo túnel, para o log: as primeiras e quantas faltam (o gateway pode mandar milhares).
+pub fn describe_routes(config: &TunnelConfig) -> String {
+    const SHOWN: usize = 20;
+    let routes = tunnel_routes(config);
+    if routes.is_empty() {
+        return "none".into();
+    }
+    let mut text = routes.iter().take(SHOWN).map(Route::to_string).collect::<Vec<_>>().join(", ");
+    if routes.len() > SHOWN {
+        text.push_str(&format!(" and {} more", routes.len() - SHOWN));
+    }
+    text
 }
 
 pub fn teardown(os: &dyn Os, applied: &Mutex<Applied>) {
@@ -239,6 +333,79 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("ovg-{}-{}", name, std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    fn cidr(text: &str) -> Route {
+        Route::parse_cidr(text).unwrap()
+    }
+
+    fn config_with(routes: &[&str], full_tunnel: bool) -> TunnelConfig {
+        TunnelConfig {
+            gateway: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)),
+            ip: Ipv4Addr::new(10, 100, 0, 2),
+            peer: Ipv4Addr::new(169, 254, 2, 1),
+            dns_servers: vec![],
+            dns_suffixes: vec![],
+            routes: routes.iter().map(|r| cidr(r)).collect(),
+            full_tunnel,
+            mtu: 1354,
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn cidr_is_read_with_the_host_bits_cleared() {
+        assert_eq!(cidr("10.1.2.3/8"), Route { addr: Ipv4Addr::new(10, 0, 0, 0), mask: Ipv4Addr::new(255, 0, 0, 0) });
+        assert_eq!(cidr("172.16.0.0/12").mask, Ipv4Addr::new(255, 240, 0, 0));
+        assert_eq!(cidr("192.0.2.7"), Route { addr: Ipv4Addr::new(192, 0, 2, 7), mask: Ipv4Addr::BROADCAST });
+        assert_eq!(cidr("10.0.0.0/8").to_string(), "10.0.0.0/8");
+    }
+
+    #[test]
+    fn invalid_or_default_cidr_is_refused() {
+        for bad in ["", "0.0.0.0/0", "10.0.0.0/33", "10.0.0.0/", "10.0.0.0/+8", "10.0.0/8", "corp.example/8", "::1/128", "10.0.0.0/8 x"] {
+            let err = Route::parse_cidr(bad).unwrap_err();
+            assert!(err.contains("Invalid tunnel route"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn tunnel_routes_drop_duplicates_and_have_a_limit() {
+        let routes = parse_tunnel_routes(&[" 10.0.0.0/8".into(), "10.9.9.9/8".into(), "172.16.0.0/12".into()]).unwrap();
+        assert_eq!(routes, [cidr("10.0.0.0/8"), cidr("172.16.0.0/12")]);
+        let mut many: Vec<String> = (0..=MAX_TUNNEL_ROUTES).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)).collect();
+        assert!(parse_tunnel_routes(&many).unwrap_err().contains("Too many tunnel routes"));
+        // As repetidas não contam para o limite.
+        many.pop();
+        many.push("10.0.0.0/24".into());
+        assert_eq!(parse_tunnel_routes(&many).unwrap().len(), MAX_TUNNEL_ROUTES);
+    }
+
+    #[test]
+    fn full_tunnel_is_any_set_of_routes_that_covers_everything() {
+        assert!(is_full_tunnel(&config_with(&[], true)));
+        assert!(is_full_tunnel(&config_with(&["10.0.0.0/8", "0.0.0.0/1", "128.0.0.0/1"], false)));
+        // Uma default no split vira as duas metades.
+        let mut default_in_split = config_with(&["10.0.0.0/8"], false);
+        default_in_split.routes.push(Route { addr: Ipv4Addr::UNSPECIFIED, mask: Ipv4Addr::UNSPECIFIED });
+        assert!(is_full_tunnel(&default_in_split));
+        assert!(!is_full_tunnel(&config_with(&["10.0.0.0/8", "172.16.0.0/12"], false)));
+        assert!(!is_full_tunnel(&config_with(&["0.0.0.0/1"], false)));
+        assert!(!is_full_tunnel(&config_with(&[], false)));
+        // Fragmentado em redes menores, também cobre tudo.
+        assert!(is_full_tunnel(&config_with(&["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/3", "224.0.0.0/3"], false)));
+        assert!(!is_full_tunnel(&config_with(&["0.0.0.0/2", "64.0.0.0/2", "128.0.0.0/2", "192.0.0.0/3"], false)));
+        assert!(is_full_tunnel(&config_with(&["128.0.0.0/2", "0.0.0.0/1", "192.0.0.0/2", "10.0.0.0/8"], false)));
+    }
+
+    #[test]
+    fn routes_are_described_up_to_a_limit() {
+        assert_eq!(describe_routes(&config_with(&["10.0.0.0/8", "172.16.0.0/12"], false)), "10.0.0.0/8, 172.16.0.0/12");
+        assert_eq!(describe_routes(&config_with(&[], true)), "0.0.0.0/1, 128.0.0.0/1");
+        assert_eq!(describe_routes(&config_with(&[], false)), "none");
+        let many: Vec<String> = (0..25).map(|i| format!("10.{i}.0.0/16")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        assert!(describe_routes(&config_with(&refs, false)).ends_with("10.19.0.0/16 and 5 more"));
     }
 
     #[test]

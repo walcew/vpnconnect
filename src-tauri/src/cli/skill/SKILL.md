@@ -35,6 +35,7 @@ Ask the human, then wait. Never guess or work around these:
 - Trusting a certificate (`profile trust`, `--auto-trust`): the human decides after checking the digest.
 - The administrator password of the Helper install: typed by the human in the macOS dialog.
 - The Profile's password: it comes from the human or from a secret store you are allowed to read.
+- Full tunnel or not: which networks go through the VPN (`--route`, `--clear-routes`). It decides what the organization behind the VPN can see, and its policy may require full tunnel.
 
 ## Connect
 
@@ -52,6 +53,7 @@ vpnconnect connect <profile> --no-browser --timeout 300
 4. A SAML or Check Point Profile prints the login URL on stderr and opens the default browser. With `--no-browser` it only prints. A FortiToken push prints on stderr that it waits for the phone. Run `connect` in the background, read stderr, tell the human what to do (show the URL, ask for the approval) and wait for the exit.
 5. On `CERT_UNTRUSTED` the error carries `cert_digest`. Show the human the digest and the command `vpnconnect profile trust <profile> <digest>`, then stop. The human verifies the certificate and runs it. Run it yourself only when the human, having seen this digest, tells you to.
 6. `HELPER_NOT_INSTALLED` and `HELPER_OUTDATED` mean the Helper needs `vpnconnect helper install`; tell the human (see Helper).
+7. If the session comes up in full tunnel, `connect` still exits 0 and prints a warning on stderr. Tell the human (see Full tunnel).
 
 Ctrl-C or SIGINT during `connect` cancels the pending login and exits 130. After a successful `connect` there is nothing to keep running.
 
@@ -61,16 +63,27 @@ Ctrl-C or SIGINT during `connect` cancels the pending login and exits 130. After
 vpnconnect status --json
 ```
 
-Prints the Helper's state as-is plus `profile` (`{"id","name"}`, or `null` without a session; `name` is `null` if the Profile no longer exists here). `state` is `disconnected`, `connecting`, `waiting-saml` (with `url`), `waiting-push` or `connected`. A connected session has `ip`, `since`, `expires_at`, `dns_servers` and `dns_suffixes`. After a drop, `disconnected` carries `reason` and `cause` (`tunnel-dropped`, `expired`); a login the gateway refused also ends in `disconnected` with `reason` and `cause` `login-failed`.
+Prints the Helper's state as-is plus `profile` (`{"id","name"}`, or `null` without a session; `name` is `null` if the Profile no longer exists here). `state` is `disconnected`, `connecting`, `waiting-saml` (with `url`), `waiting-push` or `connected`. A connected session has `ip`, `since`, `expires_at`, `dns_servers`, `dns_suffixes` and `full_tunnel`. After a drop, `disconnected` carries `reason` and `cause` (`tunnel-dropped`, `expired`); a login the gateway refused also ends in `disconnected` with `reason` and `cause` `login-failed`.
 
 When an internal host is unreachable, read `status` before anything else:
 
 - `connected`: the VPN is up; the problem is the host, the route or the DNS, so say so.
+- `connected` with `full_tunnel: true` and public sites or names failing too: the gateway sends all traffic through the VPN and may block the internet or public DNS. See Full tunnel.
 - `disconnected`: report `reason` and `cause`, then ask the human whether to connect.
 - `waiting-saml` or `waiting-push`: a login is pending and needs the human.
 - `HELPER_NOT_INSTALLED`, `HELPER_OUTDATED` or `HELPER_UNAVAILABLE`: run `vpnconnect helper status` (see Helper).
 
 `vpnconnect disconnect` ends the session or cancels a pending login, whoever started it, and exits 0 when there is none. Run it only when the human asks you to disconnect, or to cancel a login your own `connect` started.
+
+## Full tunnel
+
+`full_tunnel: true` in `status`, `connect` and `watch` means all of this machine's traffic goes through the VPN, not only the internal networks. This is a privacy matter: the organization behind the VPN can see and log all of it, personal traffic included. The gateway can switch to full tunnel without notice.
+
+- Whenever you see `full_tunnel: true`, tell the human in plain words that all of the machine's traffic is going through the VPN.
+- In full tunnel the VPN DNS resolves every name (`dns_suffixes` is empty in `status`): the split-DNS domains would send the other names to a public resolver that the gateway may block. Split DNS comes back with `--route`.
+- To send only some networks through the VPN, the Profile takes `--route <CIDR>` (repeat for several): then only those networks use the tunnel and the gateway's routes, full tunnel included, are ignored. The DNS keeps the split-DNS domains. Which networks, and whether to leave full tunnel at all, is the human's call: ask for the networks (often internal ranges like `10.0.0.0/8`), never guess them, and say that the organization's policy may require full tunnel.
+- The new routes apply on the next connect. Disconnect and connect again only when the human asks.
+- `--clear-routes` gives the routing back to the gateway.
 
 ## Follow the session
 
@@ -86,7 +99,7 @@ vpnconnect watch
 
 ## Profiles
 
-A Profile is a saved gateway: engine (`fortinet` or `checkpoint`), host, port, authentication (`password` or `saml`), username, realm, OTP flag, trusted certificates, split-DNS domains. A Profile saved before engines existed is `fortinet`.
+A Profile is a saved gateway: engine (`fortinet` or `checkpoint`), host, port, authentication (`password` or `saml`), username, realm, OTP flag, trusted certificates, split-DNS domains, networks through the VPN (`routes`). A Profile saved before engines existed is `fortinet`.
 
 ```bash
 vpnconnect profile ls --json
@@ -94,6 +107,7 @@ vpnconnect profile show <profile> --json
 vpnconnect profile add --name <name> --host <host> --auth password --username <user> --dns-domain corp.example.com
 vpnconnect profile add --engine checkpoint --name <name> --host <host> --realm <login-option>
 vpnconnect profile edit <profile> --port 443
+vpnconnect profile edit <profile> --route 10.0.0.0/8 --route 172.16.0.0/12
 vpnconnect profile rm <profile>
 vpnconnect profile set-password <profile> --password-stdin
 vpnconnect profile clear-password <profile>
@@ -102,7 +116,7 @@ vpnconnect profile untrust <profile> <sha256>
 ```
 
 - Target a Profile by id or exact name. A partial or ambiguous name is refused (`PROFILE_NOT_FOUND`, `PROFILE_AMBIGUOUS`); take the id from `profile ls`.
-- `profile add` and `profile edit` take the same flags, and `edit` changes only the flags passed. `--dns-domain` repeats and replaces the whole list; `--clear-dns-domains` empties it.
+- `profile add` and `profile edit` take the same flags, and `edit` changes only the flags passed. `--dns-domain` repeats and replaces the whole list; `--clear-dns-domains` empties it. `--route` and `--clear-routes` work the same way for the networks (see Full tunnel).
 - `--engine fortinet|checkpoint` is a `profile add` flag only: the engine is chosen at creation and `profile edit` cannot change it. Fortinet is the default. Ask the human which one the gateway is; there is no detection.
 - A Check Point Profile always signs in through the identity provider, in the browser, with port 443 as the default. `--auth` is optional and only takes `saml`; `--username`, `--otp-required`, `--auth password` and `profile set-password` are refused with `INVALID_ARGUMENT`, on `add` and on `edit`. `--realm` holds the login option id (the gateway's id for its identity provider login); leave it out when the gateway offers a single option, and ask the human for the id when `connect` fails because the gateway offers several. No command lists the options.
 - A Check Point gateway announces DNS suffixes, and only names under them go to the VPN DNS. If the internal names fall outside those suffixes (an internal host does not resolve although `status` is `connected`), the Profile needs `--dns-domain` for each domain: `profile edit <profile> --dns-domain corp.example.com`. The Profile list replaces the gateway's, so include every domain you still need. Ask the human which domains; do not guess them.
@@ -147,6 +161,7 @@ Without `--json`, stdout is for people. With `--json`, stdout carries only JSON,
 | `PROFILE_AMBIGUOUS` | 1 | The name matches several Profiles; use the id |
 | `PROFILE_NAME_TAKEN` | 1 | Profile names are unique; pick another |
 | `INVALID_DNS_DOMAIN` | 1 | A `--dns-domain` the app would reject; fix the value |
+| `INVALID_ROUTE` | 1 | A `--route` that is not an IPv4 network in CIDR (`10.0.0.0/8`), is `0.0.0.0/0` or one of too many; fix the value |
 | `INVALID_CERT_DIGEST` | 1 | Not a sha256 (64 hex characters); copy it again |
 | `OTP_REQUIRED` | 1 | The Profile needs an OTP; ask the human for a code, pass `--otp` |
 | `CREDENTIALS_MISSING` | 1 | No saved password; ask the human, then `profile set-password` |
@@ -170,6 +185,7 @@ Without `--json`, stdout is for people. With `--json`, stdout carries only JSON,
 - Leave the decision to trust a certificate to the human: show the digest, wait.
 - Keep the password off command lines, `echo`, files and logs: stdin only.
 - Leave a session the human opened as it is: no `disconnect`, no replacing it with `connect`, unless they ask.
-- Treat `profile rm`, `helper uninstall`, `--auto-trust` and settings changes as the human's calls; run them on request.
+- Treat `profile rm`, `helper uninstall`, `--auto-trust`, `--route`, `--clear-routes` and settings changes as the human's calls; run them on request.
+- Never let a full tunnel go unmentioned: tell the human whenever `full_tunnel` is true.
 - Ask the human for every OTP and every approval; never reuse an old code.
 - Stop at `HELPER_UNAUTHORIZED`, `HELPER_INSTALL_CANCELLED` and `LOGIN_FAILED`; report instead of retrying.

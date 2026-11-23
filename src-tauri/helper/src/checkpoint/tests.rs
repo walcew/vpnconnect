@@ -102,7 +102,7 @@ async fn idp_login_connects_and_applies_the_gateway_network_without_leaking_secr
     // O protocolo não dá par: o próprio IP do túnel; sem MTU anunciado, 1350.
     let mut calls = vec![OsCall::AddGatewayRoute(IpAddr::V4(Ipv4Addr::LOCALHOST)), OsCall::Up { ip: ASSIGNED_IP, peer: ASSIGNED_IP, mtu: 1350 }];
     calls.extend(ROUTES.iter().map(|(a, m)| OsCall::AddRoute(route(a, m))));
-    calls.push(OsCall::SetDns { servers: DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec() });
+    calls.push(OsCall::SetDns { servers: DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec(), global: false });
     assert_eq!(os.calls(), calls);
 
     // As faixas vêm do `ClientSettings` da sessão autenticada; a do próprio gateway é ignorada.
@@ -272,7 +272,20 @@ async fn profile_match_domains_replace_the_gateway_suffixes() {
     let (state, _) = idp_connect(&mut c, &gw, profile).await;
     assert_eq!(state["dns_servers"], json!(DNS.map(|d| d.to_string())));
     assert_eq!(state["dns_suffixes"], json!(["intra.example"]));
-    assert!(os.calls().contains(&OsCall::SetDns { servers: DNS.to_vec(), suffixes: vec!["intra.example".into()] }));
+    assert!(os.calls().contains(&OsCall::SetDns { servers: DNS.to_vec(), suffixes: vec!["intra.example".into()], global: false }));
+}
+
+#[tokio::test]
+async fn profile_networks_replace_the_gateway_ranges() {
+    let _ports = SAML_PORTS.lock().await;
+    let gw = FakeCheckpoint::start(CheckpointOptions::default()).await;
+    let (path, os) = start(&gw, None).await;
+    let mut c = client(&path).await;
+    let mut profile = gw.profile();
+    profile["tunnel_routes"] = json!(["192.0.2.0/24"]);
+    let (state, _) = idp_connect(&mut c, &gw, profile).await;
+    assert_eq!(added_routes(&os), [route("192.0.2.0", "255.255.255.0")]);
+    assert_eq!(state["full_tunnel"], false, "{}", state);
 }
 
 /// Próximo evento de banda, como (rx, tx).

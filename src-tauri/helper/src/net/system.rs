@@ -87,10 +87,10 @@ impl Os for SystemOs {
         })
     }
 
-    fn set_dns(&self, servers: &[Ipv4Addr], suffixes: &[String]) -> Result<(), String> {
+    fn set_dns(&self, servers: &[Ipv4Addr], suffixes: &[String], global: bool) -> Result<(), String> {
         let servers: Vec<String> = servers.iter().map(Ipv4Addr::to_string).collect();
         block_in_place(|| {
-            write_dns_config(&servers, suffixes)?;
+            write_dns_config(&servers, suffixes, global)?;
             flush_dns_cache();
             Ok(())
         })
@@ -319,8 +319,9 @@ fn scutil(input: &str) -> Result<ExitStatus, String> {
         .map_err(|e| format!("Failed to run scutil: {}", e))
 }
 
-/// Split DNS via scutil: os servidores respondem só pelos sufixos (ou por tudo, sem sufixos).
-pub fn write_dns_config(servers: &[String], suffixes: &[String]) -> Result<(), String> {
+/// DNS via scutil: os servidores respondem só pelos sufixos (split DNS), ou por tudo com `global`
+/// ou sem sufixos; com `global`, os sufixos ficam como domínios de busca.
+pub fn write_dns_config(servers: &[String], suffixes: &[String], global: bool) -> Result<(), String> {
     if servers.is_empty() {
         return Err("No DNS servers provided".to_string());
     }
@@ -335,8 +336,8 @@ pub fn write_dns_config(servers: &[String], suffixes: &[String]) -> Result<(), S
             return Err(format!("Invalid DNS suffix: {}", s));
         }
     }
-    log::info!("Setting up DNS with servers: {} suffixes: {:?}", servers.join(" "), suffixes);
-    let status = scutil(&scutil_dns_input(servers, suffixes))?;
+    log::info!("Setting up DNS with servers: {} suffixes: {:?} global: {}", servers.join(" "), suffixes, global);
+    let status = scutil(&scutil_dns_input(servers, suffixes, global))?;
     if !status.success() {
         return Err(format!("scutil exited with status: {}", status));
     }
@@ -353,18 +354,17 @@ fn scutil_remove_input() -> String {
     format!("remove {DNS_KEY}\nremove {LEGACY_DNS_KEY}\nquit\n")
 }
 
-fn scutil_dns_input(servers: &[String], suffixes: &[String]) -> String {
+fn scutil_dns_input(servers: &[String], suffixes: &[String], global: bool) -> String {
     let servers = servers.join(" ");
-    if suffixes.is_empty() {
-        format!(
-            "d.init\nd.add ServerAddresses * {servers}\nd.add SupplementalMatchDomains * \"\"\nset {DNS_KEY}\nquit\n"
-        )
-    } else {
-        let domains = suffixes.join(" ");
-        format!(
-            "d.init\nd.add ServerAddresses * {servers}\nd.add SupplementalMatchDomains * {domains}\nd.add SearchDomains * {domains}\nset {DNS_KEY}\nquit\n"
-        )
-    }
+    let domains = suffixes.join(" ");
+    // O domínio vazio ("") casa com qualquer nome.
+    let matches = match (global || suffixes.is_empty(), suffixes.is_empty()) {
+        (true, true) => "\"\"".to_string(),
+        (true, false) => format!("\"\" {domains}"),
+        (false, _) => domains.clone(),
+    };
+    let search = if suffixes.is_empty() { String::new() } else { format!("d.add SearchDomains * {domains}\n") };
+    format!("d.init\nd.add ServerAddresses * {servers}\nd.add SupplementalMatchDomains * {matches}\n{search}set {DNS_KEY}\nquit\n")
 }
 
 pub fn flush_dns_cache() {
@@ -442,10 +442,20 @@ mod tests {
 
     #[test]
     fn scutil_input_scopes_servers_to_suffixes() {
-        let input = scutil_dns_input(&strings(&["10.0.0.53"]), &strings(&["corp.example.com"]));
+        let input = scutil_dns_input(&strings(&["10.0.0.53"]), &strings(&["corp.example.com"]), false);
         assert!(input.contains("d.add ServerAddresses * 10.0.0.53\n"));
         assert!(input.contains("d.add SupplementalMatchDomains * corp.example.com\n"));
+        assert!(input.contains("d.add SearchDomains * corp.example.com\n"));
         assert!(input.contains("set State:/Network/Service/VpnConnect/DNS\n"));
+    }
+
+    #[test]
+    fn scutil_input_in_full_tunnel_matches_every_domain_and_keeps_the_suffixes_for_search() {
+        let input = scutil_dns_input(&strings(&["10.0.0.53"]), &strings(&["corp.example.com", "intra.example"]), true);
+        assert!(input.contains("d.add SupplementalMatchDomains * \"\" corp.example.com intra.example\n"), "{input}");
+        assert!(input.contains("d.add SearchDomains * corp.example.com intra.example\n"), "{input}");
+        let input = scutil_dns_input(&strings(&["10.0.0.53"]), &[], true);
+        assert!(input.contains("d.add SupplementalMatchDomains * \"\"\n") && !input.contains("SearchDomains"), "{input}");
     }
 
     #[test]
@@ -457,7 +467,7 @@ mod tests {
 
     #[test]
     fn scutil_input_without_suffixes_matches_every_domain() {
-        let input = scutil_dns_input(&strings(&["10.0.0.53", "10.0.0.54"]), &[]);
+        let input = scutil_dns_input(&strings(&["10.0.0.53", "10.0.0.54"]), &[], false);
         assert!(input.contains("d.add ServerAddresses * 10.0.0.53 10.0.0.54\n"));
         assert!(input.contains("d.add SupplementalMatchDomains * \"\"\n"));
         assert!(!input.contains("SearchDomains"));
@@ -465,14 +475,14 @@ mod tests {
 
     #[test]
     fn dns_config_rejects_invalid_servers() {
-        let err = write_dns_config(&strings(&["10.0.0.53; quit"]), &[]).unwrap_err();
+        let err = write_dns_config(&strings(&["10.0.0.53; quit"]), &[], false).unwrap_err();
         assert!(err.contains("Invalid DNS server IP"), "{}", err);
-        assert!(write_dns_config(&[], &[]).unwrap_err().contains("No DNS servers"));
+        assert!(write_dns_config(&[], &[], false).unwrap_err().contains("No DNS servers"));
     }
 
     #[test]
     fn dns_config_rejects_unsafe_suffixes() {
-        let err = write_dns_config(&strings(&["10.0.0.53"]), &strings(&["evil;quit"])).unwrap_err();
+        let err = write_dns_config(&strings(&["10.0.0.53"]), &strings(&["evil;quit"]), false).unwrap_err();
         assert!(err.contains("Invalid DNS suffix"));
     }
 }

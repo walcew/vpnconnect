@@ -141,6 +141,11 @@ fn apply(p: &mut VpnProfile, name: Option<String>, host: Option<String>, f: &Fie
     } else if !f.dns_domains.is_empty() {
         p.dns_match_domains = f.dns_domains.clone();
     }
+    if f.clear_routes {
+        p.tunnel_routes.clear();
+    } else if !f.routes.is_empty() {
+        p.tunnel_routes = f.routes.clone();
+    }
     Ok(())
 }
 
@@ -152,10 +157,12 @@ fn ensure_name_free(mgr: &VpnManager, p: &VpnProfile) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Valida os domínios de DNS como a GUI e grava o Profile pelo mesmo caminho dela.
+/// Valida os domínios de DNS e as redes como a GUI e grava o Profile pelo mesmo caminho dela.
 fn save(out: &Out, mgr: &VpnManager, mut p: VpnProfile) -> Result<(), CliError> {
     p.dns_match_domains =
         VpnManager::normalize_dns_domains(&p.dns_match_domains).map_err(|m| CliError::refused("INVALID_DNS_DOMAIN", m))?;
+    p.tunnel_routes =
+        VpnManager::normalize_tunnel_routes(&p.tunnel_routes).map_err(|m| CliError::refused("INVALID_ROUTE", m))?;
     print(out, &mgr.save_profile(p, None).map_err(CliError::cli)?)
 }
 
@@ -191,14 +198,14 @@ fn view(p: &VpnProfile) -> Result<Value, CliError> {
         "auth": if p.auth_type == AuthType::Saml { "saml" } else { "password" },
         "username": p.username, "realm": p.realm, "otp_required": p.otp_required,
         "auto_trust": p.ignore_cert_errors, "trusted_certs": p.trusted_certs,
-        "dns_domains": p.dns_match_domains, "has_password": has_password,
+        "dns_domains": p.dns_match_domains, "routes": p.tunnel_routes, "has_password": has_password,
     }))
 }
 
 fn print(out: &Out, p: &VpnProfile) -> Result<(), CliError> {
     let v = view(p)?;
     out.emit(&v, || {
-        for key in ["id", "name", "engine", "host", "port", "auth", "username", "realm", "otp_required", "auto_trust", "trusted_certs", "dns_domains", "has_password"] {
+        for key in ["id", "name", "engine", "host", "port", "auth", "username", "realm", "otp_required", "auto_trust", "trusted_certs", "dns_domains", "routes", "has_password"] {
             if let Some(text) = output::text(&v[key]) {
                 println!("{:<14} {text}", format!("{key}:"));
             }

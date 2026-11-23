@@ -59,6 +59,16 @@ fn drop_notice(was_connected: bool, cause: Option<Cause>) -> Option<(&'static st
     }
 }
 
+/// Notificação (título, corpo) de uma sessão que subiu em full tunnel: na chegada a `connected`,
+/// inclusive numa reconexão depois de troca de rede ou wake, e não de novo enquanto ela durar.
+/// Questão de privacidade: aparece mesmo com a janela fechada.
+fn full_tunnel_notice(was_connected: bool, state: &ConnectionState) -> Option<(&'static str, &'static str)> {
+    (state.is_full_tunnel() && !was_connected).then_some((
+        FULL_TUNNEL_NOTICE,
+        "The organization behind the VPN can see all of this Mac's traffic. To limit it, set the networks in the Profile.",
+    ))
+}
+
 /// Título do aviso de expiração, no horário local.
 fn expiring_notice(expires_at: &str) -> Option<String> {
     let at = DateTime::parse_from_rfc3339(expires_at).ok()?.with_timezone(&chrono::Local);
@@ -126,6 +136,9 @@ pub fn start(app: AppHandle) {
                     }
                     // Desktop não tem botão de ação na notificação: reconectar é o Connect da janela e da tray.
                     let was_connected = swap_connected(&mut connected, &state);
+                    if let Some((title, body)) = full_tunnel_notice(was_connected, &state) {
+                        notify(&app, title, body);
+                    }
                     if let Some((title, body)) = drop_notice(was_connected, cause) {
                         notify(&app, title, body);
                     }
@@ -265,7 +278,7 @@ mod tests {
     }
 
     fn connected_state() -> ConnectionState {
-        ConnectionState::Connected { profile_id: "p1".into(), ip: "10.0.0.2".into(), since: Utc::now(), dns_servers: vec![], dns_domains: vec![] }
+        ConnectionState::Connected { profile_id: "p1".into(), ip: "10.0.0.2".into(), since: Utc::now(), dns_servers: vec![], dns_domains: vec![], full_tunnel: false }
     }
 
     #[test]
@@ -290,6 +303,21 @@ mod tests {
         assert!(drop_notice(true, Some(Cause::LoginFailed)).is_none());
         // Causa sem ter passado por connected (ex.: canal aberto depois da queda já notificada).
         assert!(drop_notice(false, Some(Cause::Expired)).is_none());
+    }
+
+    #[test]
+    fn full_tunnel_notifies_once_when_the_session_comes_up() {
+        let full = ConnectionState::Connected { profile_id: "p1".into(), ip: "10.0.0.2".into(), since: Utc::now(), dns_servers: vec![], dns_domains: vec![], full_tunnel: true };
+        let notices = |states: &[ConnectionState]| {
+            let mut connected = false;
+            states.iter().map(|s| full_tunnel_notice(swap_connected(&mut connected, s), s).is_some()).collect::<Vec<_>>()
+        };
+        // Conectou em full tunnel: avisa; o mesmo estado repetido não avisa de novo.
+        assert_eq!(notices(&[connecting("p1"), full.clone(), full.clone()]), [false, true, false]);
+        // Caiu e voltou (troca de rede, wake): avisa de novo.
+        assert_eq!(notices(&[full.clone(), error("x"), connecting("p1"), full.clone()]), [true, false, false, true]);
+        // Split tunnel não avisa.
+        assert_eq!(notices(&[connecting("p1"), connected_state()]), [false, false]);
     }
 
     #[test]

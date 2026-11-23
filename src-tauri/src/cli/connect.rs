@@ -55,6 +55,13 @@ pub fn run(out: &Out, target: &str, otp: Option<&str>, timeout: u64, no_browser:
         }
         match frame["state"].as_str() {
             Some("connected") => {
+                if frame["full_tunnel"] == true {
+                    eprintln!(
+                        "warning: full tunnel: {}. To send only some networks through it: vpnconnect profile edit {} --route <CIDR>",
+                        status::FULL_TUNNEL_WARNING,
+                        frame["profile_id"].as_str().unwrap_or("<profile>")
+                    );
+                }
                 status::print(out, frame);
                 return Ok(());
             }

@@ -17,7 +17,7 @@ pub enum OsCall {
     AddRoute(Route),
     AddGatewayRoute(IpAddr),
     MoveGatewayRoute(IpAddr),
-    SetDns { servers: Vec<Ipv4Addr>, suffixes: Vec<String> },
+    SetDns { servers: Vec<Ipv4Addr>, suffixes: Vec<String>, global: bool },
     RemoveDns,
     RemoveGatewayRoute(IpAddr, IpAddr),
     Down,
@@ -157,8 +157,8 @@ impl Os for FakeOs {
             Failure::Panic => panic!("fake add_gateway_route panic"),
         }
     }
-    fn set_dns(&self, servers: &[Ipv4Addr], suffixes: &[String]) -> Result<(), String> {
-        self.record(OsCall::SetDns { servers: servers.to_vec(), suffixes: suffixes.to_vec() });
+    fn set_dns(&self, servers: &[Ipv4Addr], suffixes: &[String], global: bool) -> Result<(), String> {
+        self.record(OsCall::SetDns { servers: servers.to_vec(), suffixes: suffixes.to_vec(), global });
         match self.set_dns {
             Failure::Error => Err("fake set_dns failure".into()),
             _ => Ok(()),

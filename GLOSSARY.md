@@ -24,6 +24,14 @@ _Avoid_: Realm (no Check Point), login method
 Opção do Profile que aceita qualquer certificado do gateway, só do host daquele Profile, registrando no log as trocas de digest entre conexões. No código, `ignore_cert_errors`.
 _Avoid_: Ignorar certificado, insecure, skip verify
 
+**Full tunnel**:
+Sessão em que todo o tráfego IPv4 da máquina passa pela VPN, porque o gateway mandou (full tunnel ou rota default) ou porque as redes do Profile cobrem tudo. É questão de privacidade: a organização da VPN vê todo esse tráfego. O Helper marca `full_tunnel` no estado, e a GUI (painel, tray, notificação) e a CLI (`status`, `connect`) avisam. Em full tunnel o DNS da VPN resolve todos os nomes; os domínios de split DNS ficam só como domínios de busca.
+_Avoid_: Túnel completo, all traffic mode
+
+**Redes pela VPN**:
+Opção do Profile com as redes, em CIDR IPv4, que passam pelo túnel. Preenchida, substitui as rotas do gateway, inclusive a default e o full tunnel; vazia, valem as rotas do gateway. No código, `tunnel_routes`; na CLI, `--route`.
+_Avoid_: Split routes, rotas customizadas
+
 **OTP**:
 Código de uso único que o usuário digita para concluir o segundo fator de um Profile com senha.
 _Avoid_: Token, 2FA code, TOTP code

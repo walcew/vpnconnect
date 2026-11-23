@@ -1,0 +1,25 @@
+<svg viewBox="0 0 22 24" xmlns="http://www.w3.org/2000/svg">
+  <!-- Full tunnel: the connected shield with a globe instead of the padlock,
+       because all of the machine's traffic goes through the VPN. -->
+  <defs>
+    <mask id="globe-mask">
+      <!-- White = visible, Black = hidden -->
+      <rect width="22" height="24" fill="white"/>
+      <!-- Cut out the globe: outline, meridian and parallels -->
+      <g transform="translate(11, 12.5) scale(0.13)" fill="none" stroke="black" stroke-width="7">
+        <circle cx="0" cy="2" r="30"/>
+        <ellipse cx="0" cy="2" rx="12" ry="30"/>
+        <line x1="-30" y1="2" x2="30" y2="2"/>
+        <path d="M-25 -14 H25 M-25 18 H25"/>
+      </g>
+    </mask>
+  </defs>
+
+  <!-- Shield FILLED with the globe cutout via mask -->
+  <g mask="url(#globe-mask)">
+    <g transform="translate(11, 12.5) scale(0.13)">
+      <path d="M0 -72 L-65 -50 L-65 -2 C-65 28 -35 58 0 72 C35 58 65 28 65 -2 L65 -50 Z"
+            fill="black" stroke="black" stroke-width="12" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

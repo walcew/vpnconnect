@@ -32,6 +32,19 @@ pub(super) fn profile(id: Option<&str>) -> Value {
     json!({"id": id, "name": name})
 }
 
+/// O aviso de full tunnel, só numa sessão conectada: nenhuma linha fora dela.
+fn full_tunnel(state: &Value) -> Value {
+    match state["full_tunnel"].as_bool() {
+        Some(true) => Value::from(format!("yes: {FULL_TUNNEL_WARNING}")),
+        Some(false) => Value::from("no"),
+        None => Value::Null,
+    }
+}
+
+/// O que o `status` e o `connect` dizem de uma sessão em full tunnel. Questão de privacidade: a
+/// organização da VPN vê todo esse tráfego.
+pub(super) const FULL_TUNNEL_WARNING: &str = "all of this machine's traffic goes through the VPN";
+
 fn print_human(state: &Value) {
     let profile = &state["profile"];
     let profile = match profile["name"].as_str() {
@@ -46,6 +59,7 @@ fn print_human(state: &Value) {
         ("Expires", &state["expires_at"]),
         ("DNS servers", &state["dns_servers"]),
         ("DNS suffixes", &state["dns_suffixes"]),
+        ("Full tunnel", &full_tunnel(state)),
         ("Login URL", &state["url"]),
         ("Reason", &state["reason"]),
         ("Cause", &state["cause"]),

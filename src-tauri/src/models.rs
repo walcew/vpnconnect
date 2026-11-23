@@ -55,6 +55,11 @@ pub struct VpnProfile {
     /// global DNS if the gateway sends none).
     #[serde(default)]
     pub dns_match_domains: Vec<String>,
+    /// Redes pela VPN, em CIDR IPv4. Preenchido, só elas passam pelo túnel, no lugar das rotas
+    /// do gateway (inclusive da default e do full tunnel); vazio mantém as rotas do gateway.
+    /// Vazio fica fora do arquivo, para o Profile de antes não ser reescrito.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tunnel_routes: Vec<String>,
     pub extra_args: Vec<String>,
 }
 
@@ -73,6 +78,7 @@ impl Default for VpnProfile {
             trusted_certs: Vec::new(),
             ignore_cert_errors: false,
             dns_match_domains: Vec::new(),
+            tunnel_routes: Vec::new(),
             extra_args: Vec::new(),
         }
     }
@@ -116,9 +122,20 @@ pub enum ConnectionState {
         dns_servers: Vec<String>,
         /// Domains that use this DNS; empty = the VPN's DNS is the global resolver.
         dns_domains: Vec<String>,
+        /// Todo o tráfego da máquina passa pela VPN; a janela, a tray e a notificação avisam.
+        full_tunnel: bool,
     },
     Disconnecting,
     Error { message: String },
+}
+
+/// O aviso de full tunnel na tray e na notificação.
+pub const FULL_TUNNEL_NOTICE: &str = "Full tunnel: all traffic goes through the VPN";
+
+impl ConnectionState {
+    pub fn is_full_tunnel(&self) -> bool {
+        matches!(self, ConnectionState::Connected { full_tunnel: true, .. })
+    }
 }
 
 impl Default for ConnectionState {
@@ -138,6 +155,8 @@ pub struct ConnectionStatusPayload {
     pub dns_servers: Vec<String>,
     #[serde(default)]
     pub dns_domains: Vec<String>,
+    #[serde(default)]
+    pub full_tunnel: bool,
 }
 
 impl From<&ConnectionState> for ConnectionStatusPayload {
@@ -178,6 +197,7 @@ impl From<&ConnectionState> for ConnectionStatusPayload {
                 since,
                 dns_servers,
                 dns_domains,
+                full_tunnel,
             } => ConnectionStatusPayload {
                 state: "Connected".into(),
                 profile_id: Some(profile_id.clone()),
@@ -186,6 +206,7 @@ impl From<&ConnectionState> for ConnectionStatusPayload {
                 message: None,
                 dns_servers: dns_servers.clone(),
                 dns_domains: dns_domains.clone(),
+                full_tunnel: *full_tunnel,
                 ..Default::default()
             },
             ConnectionState::Disconnecting => ConnectionStatusPayload {

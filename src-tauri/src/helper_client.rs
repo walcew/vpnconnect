@@ -131,6 +131,7 @@ pub fn connect_request(profile: &VpnProfile, creds: &Credentials, otp: Option<&s
             "trusted_certs": profile.trusted_certs,
             "ignore_cert_errors": profile.ignore_cert_errors,
             "dns_match_domains": profile.dns_match_domains,
+            "tunnel_routes": profile.tunnel_routes,
             "dns_fallback_servers": dns_fallback_servers,
             "realm": profile.realm,
         },
@@ -267,6 +268,7 @@ fn parse_state(v: &Value) -> Option<ConnectionState> {
                 .unwrap_or_else(Utc::now),
             dns_servers: str_list(&v["dns_servers"]),
             dns_domains: str_list(&v["dns_suffixes"]),
+            full_tunnel: v["full_tunnel"].as_bool().unwrap_or(false),
         },
         _ => return None,
     })
@@ -385,6 +387,7 @@ mod tests {
             username: Some("alice".into()),
             trusted_certs: vec!["abc".into()],
             dns_match_domains: vec!["corp.example.com".into()],
+            tunnel_routes: vec!["10.0.0.0/8".into()],
             ..VpnProfile::default()
         }
     }
@@ -400,8 +403,8 @@ mod tests {
                 "profile": {
                     "id": "p1", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth": "password",
                     "username": "alice", "trusted_certs": ["abc"], "ignore_cert_errors": false,
-                    "dns_match_domains": ["corp.example.com"], "dns_fallback_servers": ["192.168.0.1"],
-                    "realm": null
+                    "dns_match_domains": ["corp.example.com"], "tunnel_routes": ["10.0.0.0/8"],
+                    "dns_fallback_servers": ["192.168.0.1"], "realm": null
                 },
                 "password": "s3cret", "otp": null
             })
@@ -468,11 +471,12 @@ mod tests {
         let (path, _rx) = fake_helper(vec![], |_| {
             vec![json!({"v": 2, "type": "response", "ok": true, "state": "connected",
                 "profile_id": "p1", "ip": "10.0.0.2", "since": "2026-01-01T10:00:00Z",
-                "dns_servers": ["10.0.0.1"], "dns_suffixes": ["corp.example.com"], "expires_at": null})]
+                "dns_servers": ["10.0.0.1"], "dns_suffixes": ["corp.example.com"], "expires_at": null, "full_tunnel": true})]
         });
         match status(&path).unwrap() {
-            ConnectionState::Connected { profile_id, ip, dns_servers, dns_domains, since } => {
+            ConnectionState::Connected { profile_id, ip, dns_servers, dns_domains, since, full_tunnel } => {
                 assert_eq!((profile_id.as_str(), ip.as_str()), ("p1", "10.0.0.2"));
+                assert!(full_tunnel);
                 assert_eq!(dns_servers, ["10.0.0.1"]);
                 assert_eq!(dns_domains, ["corp.example.com"]);
                 assert_eq!(since.to_rfc3339(), "2026-01-01T10:00:00+00:00");
@@ -556,7 +560,8 @@ mod tests {
                 "profile": {
                     "id": "p1", "engine": "fortinet", "host": "vpn.example.com", "port": 443, "auth": "saml",
                     "trusted_certs": ["abc"], "ignore_cert_errors": false,
-                    "dns_match_domains": ["corp.example.com"], "dns_fallback_servers": [], "realm": null
+                    "dns_match_domains": ["corp.example.com"], "tunnel_routes": ["10.0.0.0/8"],
+                    "dns_fallback_servers": [], "realm": null
                 },
                 "otp": null
             })

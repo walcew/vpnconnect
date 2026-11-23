@@ -27,6 +27,8 @@ function App() {
 
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [editing, setEditing] = useState<EditingState>(null);
+  // O atalho do alerta de full tunnel abre o editor já no campo das redes.
+  const [focusRoutes, setFocusRoutes] = useState(false);
   const [showLogs, setShowLogs] = useState(false);
   const [certWarning, setCertWarning] = useState<CertWarningPayload | null>(null);
   const [currentView, setCurrentView] = useState<AppView>("main");
@@ -217,6 +219,14 @@ function App() {
               pushHint={pushHint}
               onConnect={handleConnect}
               onDisconnect={handleDisconnect}
+              onLimitNetworks={
+                activeProfile
+                  ? () => {
+                      setFocusRoutes(true);
+                      setEditing(activeProfile);
+                    }
+                  : undefined
+              }
             />
           </div>
 
@@ -227,6 +237,7 @@ function App() {
                 profile={editing === "new" ? null : editing}
                 onSave={handleSave}
                 onCancel={() => setEditing(null)}
+                focusRoutes={focusRoutes}
                 onDelete={editing !== "new" ? handleDelete : undefined}
               />
             ) : (
@@ -235,8 +246,14 @@ function App() {
                 selectedProfileId={selectedProfileId}
                 activeProfileId={activeProfileId}
                 onSelect={setSelectedProfileId}
-                onEdit={(profile) => setEditing(profile)}
-                onNew={() => setEditing("new")}
+                onEdit={(profile) => {
+                  setFocusRoutes(false);
+                  setEditing(profile);
+                }}
+                onNew={() => {
+                  setFocusRoutes(false);
+                  setEditing("new");
+                }}
               />
             )}
           </div>

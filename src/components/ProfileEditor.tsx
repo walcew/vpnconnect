@@ -9,14 +9,17 @@ interface Props {
   onSave: (profile: VpnProfile, password?: string) => Promise<void>;
   onCancel: () => void;
   onDelete?: (id: string) => Promise<void>;
+  /** Abre com o foco no campo "Redes pela VPN" (atalho do alerta de full tunnel). */
+  focusRoutes?: boolean;
 }
 
-export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
+export function ProfileEditor({ profile, onSave, onCancel, onDelete, focusRoutes }: Props) {
   const isNew = profile === null;
   const [form, setForm] = useState<VpnProfile>(profile ?? newProfile());
   const [dnsDomainsText, setDnsDomainsText] = useState(
     (profile?.dns_match_domains ?? []).join(", "),
   );
+  const [routesText, setRoutesText] = useState((profile?.tunnel_routes ?? []).join(", "));
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -242,7 +245,31 @@ export function ProfileEditor({ profile, onSave, onCancel, onDelete }: Props) {
           />
           <span className="text-xs text-white/40">
             Only these domains use the VPN DNS; everything else keeps your normal DNS.
-            Leave empty to use the gateway's DNS suffixes.
+            Leave empty to use the gateway's DNS suffixes. In full tunnel the VPN DNS resolves
+            every name, since all traffic goes through the VPN anyway.
+          </span>
+        </label>
+
+        <label className="flex flex-col gap-1">
+          <span className="text-xs text-white/40">Networks through the VPN (optional)</span>
+          <input
+            id="tunnel-routes"
+            autoFocus={focusRoutes}
+            className={inputClass}
+            value={routesText}
+            onChange={(e) => {
+              setRoutesText(e.target.value);
+              setForm({
+                ...form,
+                tunnel_routes: e.target.value.split(/[,\s]+/).filter(Boolean),
+              });
+            }}
+            placeholder="10.0.0.0/8, 172.16.0.0/12"
+          />
+          <span className="text-xs text-white/40">
+            Only these networks go through the VPN; everything else uses your normal connection,
+            even if the gateway sends all traffic through it (full tunnel). Leave empty to use the
+            gateway's routes. Applies on the next connection.
           </span>
         </label>
 

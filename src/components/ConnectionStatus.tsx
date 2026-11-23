@@ -10,6 +10,8 @@ interface Props {
   pushHint: boolean;
   onConnect: () => void;
   onDisconnect: () => void;
+  /** Abre o editor do Profile conectado no campo de redes pela VPN. */
+  onLimitNetworks?: () => void;
 }
 
 const STATUS_CONFIG: Record<
@@ -40,6 +42,7 @@ export function ConnectionStatus({
   pushHint,
   onConnect,
   onDisconnect,
+  onLimitNetworks,
 }: Props) {
   const [duration, setDuration] = useState(0);
   const [showPushHint, setShowPushHint] = useState(false);
@@ -79,6 +82,28 @@ export function ConnectionStatus({
       {status.state === "Connecting" && showPushHint && (
         <div className="text-sm text-white/50 mb-2 ml-5">
           Waiting for authentication. If your gateway uses FortiToken push, approve it on your phone.
+        </div>
+      )}
+
+      {isConnected && status.full_tunnel && (
+        <div
+          role="alert"
+          className="mb-2 rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-2 text-xs text-amber-100"
+        >
+          <div className="font-medium text-amber-200">
+            Full tunnel: all of this machine's traffic goes through the VPN
+          </div>
+          <div className="mt-0.5 text-amber-100/80">
+            The organization behind the VPN can see all of it, not only the work traffic.
+          </div>
+          {onLimitNetworks && (
+            <button
+              onClick={onLimitNetworks}
+              className="mt-1.5 text-amber-200 underline underline-offset-2 hover:text-amber-100"
+            >
+              Choose the networks that go through the VPN
+            </button>
+          )}
         </div>
       )}
 

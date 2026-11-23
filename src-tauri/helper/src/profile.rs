@@ -4,6 +4,8 @@ use std::net::Ipv4Addr;
 
 use serde::Deserialize;
 
+use crate::net::Route;
+
 /// Métodos de autenticação que o Helper já fala.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +45,13 @@ pub struct Profile {
     /// dos sufixos do gateway. Vazio mantém os sufixos do gateway.
     #[serde(default)]
     pub dns_match_domains: Vec<String>,
+    /// Redes pela VPN, em CIDR IPv4: se houver, substituem as rotas do gateway, inclusive a
+    /// default e o full tunnel. Vazio mantém as rotas do gateway. Validadas no `connect`.
+    #[serde(default)]
+    pub tunnel_routes: Vec<String>,
+    /// `tunnel_routes` já lidas, preenchidas pelo `Session::connect`; nunca vêm do JSON.
+    #[serde(skip)]
+    pub tunnel_networks: Vec<Route>,
     /// DNS do sistema lido pela GUI antes de conectar (vazio com o fallback desligado ou
     /// sem DNS no sistema). Só valem, com os do Google, se o gateway não mandar servidor.
     #[serde(default)]

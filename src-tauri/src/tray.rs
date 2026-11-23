@@ -5,11 +5,14 @@ use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, SubmenuBui
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Listener, Manager};
 
-use crate::models::{ConnectionState, OtpRequestedPayload, VpnProfile};
+use crate::models::{ConnectionState, OtpRequestedPayload, VpnProfile, FULL_TUNNEL_NOTICE};
 use crate::vpn_manager::VpnManager;
 
 const TRAY_ICON_DISCONNECTED: &[u8] = include_bytes!("../icons/tray/disconnected@2x.png");
 const TRAY_ICON_CONNECTED: &[u8] = include_bytes!("../icons/tray/connected@2x.png");
+/// Conectado em full tunnel: o globo no lugar do cadeado avisa, com a janela fechada, que todo o
+/// tráfego da máquina passa pela VPN.
+const TRAY_ICON_FULL_TUNNEL: &[u8] = include_bytes!("../icons/tray/full-tunnel@2x.png");
 
 /// Build and register the system tray. Call once during app setup.
 pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
@@ -59,6 +62,7 @@ pub fn refresh_tray_menu(app: &AppHandle) {
 /// Update the tray icon to reflect the current connection state.
 pub fn update_tray_icon(app: &AppHandle, state: &ConnectionState) {
     let icon_bytes = match state {
+        s if s.is_full_tunnel() => TRAY_ICON_FULL_TUNNEL,
         ConnectionState::Connected { .. } => TRAY_ICON_CONNECTED,
         _ => TRAY_ICON_DISCONNECTED,
     };
@@ -120,7 +124,14 @@ fn build_tray_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wr
     let status_item = MenuItemBuilder::with_id("status", &status_text)
         .enabled(false)
         .build(app)?;
-    builder = builder.item(&status_item).separator();
+    builder = builder.item(&status_item);
+    if state.is_full_tunnel() {
+        let warning = MenuItemBuilder::with_id("full_tunnel", FULL_TUNNEL_NOTICE)
+            .enabled(false)
+            .build(app)?;
+        builder = builder.item(&warning);
+    }
+    builder = builder.separator();
 
     // --- Profile submenu (radio-style with check marks) ---
     if !profiles.is_empty() {

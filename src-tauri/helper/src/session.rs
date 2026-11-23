@@ -94,6 +94,9 @@ pub enum State {
         dns_servers: Vec<Ipv4Addr>,
         dns_suffixes: Vec<String>,
         expires_at: Option<String>,
+        /// Todo o tráfego IPv4 da máquina passa pela VPN. Questão de privacidade: a GUI e a CLI
+        /// avisam o usuário enquanto for verdade.
+        full_tunnel: bool,
     },
 }
 
@@ -260,7 +263,9 @@ impl Session {
     }
 
     /// Começa a conexão e volta logo; o progresso chega pelos eventos de estado.
-    pub fn connect(self: &Arc<Self>, profile: Profile, credentials: Credentials) -> Result<(), String> {
+    pub fn connect(self: &Arc<Self>, mut profile: Profile, credentials: Credentials) -> Result<(), String> {
+        // Rede inválida recusa o connect antes de qualquer login, como o realm.
+        profile.tunnel_networks = net::parse_tunnel_routes(&profile.tunnel_routes)?;
         let events = self.events.clone();
         let log: LogFn = Arc::new(move |line| {
             let _ = events.send(Event::Log { line });
@@ -427,8 +432,26 @@ impl Session {
         let mut tasks = JoinSet::new();
         let traffic = Traffic::default();
         let packets = meter(packets, &traffic, &mut tasks);
+        self.log(format!(
+            "routes from the gateway: {}",
+            if config.full_tunnel { "full tunnel".to_string() } else { net::describe_routes(&config) }
+        ));
+        // As redes do Profile valem no lugar das rotas do gateway, inclusive da default e do full
+        // tunnel: o usuário decide o que passa pela VPN, como `dns_match_domains` faz com o DNS.
+        if !profile.tunnel_networks.is_empty() {
+            config.routes = profile.tunnel_networks.clone();
+            config.full_tunnel = false;
+            self.log("using the Profile's networks instead of the gateway's routes");
+        }
         for r in net::drop_gateway_routes(&mut config) {
             self.log(format!("ignoring advertised route {}/{}: it is the gateway's own address", r.addr, r.mask));
+        }
+        let full_tunnel = net::is_full_tunnel(&config);
+        self.log(format!("routes through the tunnel: {}", net::describe_routes(&config)));
+        if full_tunnel {
+            let warning = "full tunnel: all of this machine's traffic goes through the VPN";
+            log::warn!("{}", warning);
+            self.emit(Event::Log { line: warning.into() });
         }
         match net::apply(&*self.os, &config, packets, &self.applied) {
             Ok(None) => {}
@@ -444,6 +467,12 @@ impl Session {
                 return End::Failed(e);
             }
         }
+        // Em full tunnel o `net::apply` põe o DNS da VPN para todos os nomes; o estado diz isso como
+        // sempre disse o DNS global: sem sufixos.
+        if full_tunnel && !config.dns_servers.is_empty() {
+            self.log("full tunnel: the VPN DNS resolves every name");
+            config.dns_suffixes.clear();
+        }
         let stopped = {
             let mut inner = self.inner.lock().unwrap();
             if !inner.stopping {
@@ -454,6 +483,7 @@ impl Session {
                     dns_servers: config.dns_servers.clone(),
                     dns_suffixes: config.dns_suffixes.clone(),
                     expires_at: config.expires_at.map(rfc3339),
+                    full_tunnel,
                 };
                 Self::set_state(&mut inner, &self.events, connected);
             }
@@ -629,7 +659,9 @@ mod tests {
             OsCall::Up { ip: ASSIGNED_IP, peer: PEER_IP, mtu: 1354 },
         ];
         calls.extend(routes.iter().map(|r| OsCall::AddRoute(*r)));
-        calls.push(OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec() });
+        // Com as duas metades no túnel (full tunnel), o DNS da VPN resolve todos os nomes.
+        let global = routes.contains(&route("0.0.0.0", "128.0.0.0")) && routes.contains(&route("128.0.0.0", "128.0.0.0"));
+        calls.push(OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec(), global });
         calls
     }
 
@@ -648,7 +680,8 @@ mod tests {
     #[tokio::test]
     async fn password_connect_applies_full_tunnel_without_touching_the_default_route() {
         let (_gw, _c, os, state) = connected(GatewayOptions { full_tunnel: true, ..Default::default() }).await;
-        assert_connected_state(&state);
+        // Em full tunnel o DNS da VPN é global: o estado não lista sufixos.
+        assert_eq!(state["dns_suffixes"], json!([]), "{}", state);
         // Duas metades no túnel; nenhuma rota com máscara 0.0.0.0.
         let halves = [route("0.0.0.0", "128.0.0.0"), route("128.0.0.0", "128.0.0.0")];
         assert_eq!(os.calls(), applied_calls(&halves));
@@ -688,6 +721,115 @@ mod tests {
         routes.push(route("127.0.0.0", "255.0.0.0"));
         assert_eq!(os.calls(), applied_calls(&routes));
         assert!(!lines.iter().any(|l| l.contains("ignoring")), "{:?}", lines);
+    }
+
+    /// Connect com campos extras no Profile: as chamadas de SO, o estado conectado e o log.
+    async fn connect_profile(options: GatewayOptions, profile: Value) -> (std::sync::Arc<FakeOs>, Value, Vec<String>) {
+        let gw = FakeGateway::start(options).await;
+        let (path, _session, os) = start_with_os(FakeOs::default()).await;
+        let mut c = client(&path).await;
+        let mut cmd = connect_cmd(&gw, PASSWORD);
+        cmd["profile"].as_object_mut().unwrap().extend(profile.as_object().unwrap().clone());
+        let (state, lines) = connect_logging(&mut c, cmd).await;
+        assert_eq!(state["state"], "connected", "{}", state);
+        (os, state, lines)
+    }
+
+    const FULL_TUNNEL_WARNING: &str = "full tunnel: all of this machine's traffic goes through the VPN";
+
+    #[tokio::test]
+    async fn split_tunnel_is_not_flagged_as_full_tunnel() {
+        let (_os, state, lines) = connect_profile(GatewayOptions::default(), json!({})).await;
+        assert_eq!(state["full_tunnel"], false, "{}", state);
+        assert!(!lines.iter().any(|l| l == FULL_TUNNEL_WARNING), "{:?}", lines);
+        assert!(lines.iter().any(|l| l.starts_with("routes through the tunnel: ")), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn full_tunnel_from_the_gateway_is_flagged_and_logged() {
+        for options in [GatewayOptions { full_tunnel: true, ..Default::default() }, GatewayOptions { default_route_in_split: true, ..Default::default() }] {
+            let (_os, state, lines) = connect_profile(options, json!({})).await;
+            assert_eq!(state["full_tunnel"], true, "{}", state);
+            assert!(lines.iter().any(|l| l == FULL_TUNNEL_WARNING), "{:?}", lines);
+        }
+        let (_os, _state, lines) = connect_profile(GatewayOptions { full_tunnel: true, ..Default::default() }, json!({})).await;
+        assert!(lines.iter().any(|l| l == "routes from the gateway: full tunnel"), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn profile_networks_replace_a_full_tunnel_from_the_gateway() {
+        let networks = json!({"tunnel_routes": ["10.0.0.0/8", "172.16.0.0/12"]});
+        for options in [GatewayOptions { full_tunnel: true, ..Default::default() }, GatewayOptions { default_route_in_split: true, ..Default::default() }] {
+            let (os, state, lines) = connect_profile(options, networks.clone()).await;
+            // Só as redes do Profile entram; a default do sistema e as metades ficam de fora.
+            assert_eq!(os.calls(), applied_calls(&[route("10.0.0.0", "255.0.0.0"), route("172.16.0.0", "255.240.0.0")]));
+            assert_eq!(state["full_tunnel"], false, "{}", state);
+            assert!(lines.iter().any(|l| l == "using the Profile's networks instead of the gateway's routes"), "{:?}", lines);
+            assert!(lines.iter().any(|l| l == "routes through the tunnel: 10.0.0.0/8, 172.16.0.0/12"), "{:?}", lines);
+            assert!(!lines.iter().any(|l| l == FULL_TUNNEL_WARNING), "{:?}", lines);
+        }
+    }
+
+    #[tokio::test]
+    async fn full_tunnel_makes_the_vpn_dns_resolve_every_name_even_with_profile_domains() {
+        let options = GatewayOptions { full_tunnel: true, ..Default::default() };
+        let (os, state, lines) = connect_profile(options, json!({"dns_match_domains": ["intra.example"]})).await;
+        assert!(os.calls().contains(&OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: vec!["intra.example".into()], global: true }), "{:?}", os.calls());
+        assert_eq!(state["dns_suffixes"], json!([]), "{}", state);
+        assert!(lines.iter().any(|l| l == "full tunnel: the VPN DNS resolves every name"), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn profile_networks_keep_the_split_dns() {
+        let options = GatewayOptions { full_tunnel: true, ..Default::default() };
+        let (os, state, lines) = connect_profile(options, json!({"tunnel_routes": ["10.0.0.0/8"]})).await;
+        assert!(os.calls().contains(&OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec(), global: false }));
+        assert_eq!(state["dns_suffixes"], json!(DNS_SUFFIXES), "{}", state);
+        assert!(!lines.iter().any(|l| l.contains("VPN DNS resolves every name")), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn profile_networks_also_replace_the_split_routes_of_the_gateway() {
+        let (os, _state, _lines) = connect_profile(GatewayOptions::default(), json!({"tunnel_routes": ["192.0.2.0/24"]})).await;
+        assert_eq!(os.calls(), applied_calls(&[route("192.0.2.0", "255.255.255.0")]));
+    }
+
+    #[tokio::test]
+    async fn profile_networks_that_cover_everything_are_still_flagged_as_full_tunnel() {
+        let (_os, state, lines) = connect_profile(GatewayOptions::default(), json!({"tunnel_routes": ["0.0.0.0/1", "128.0.0.0/1"]})).await;
+        assert_eq!(state["full_tunnel"], true, "{}", state);
+        assert!(lines.iter().any(|l| l == FULL_TUNNEL_WARNING), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn profile_network_equal_to_the_gateway_address_is_not_applied_through_the_tunnel() {
+        let (os, _state, lines) = connect_profile(GatewayOptions::default(), json!({"tunnel_routes": ["127.0.0.1/32", "10.0.0.0/8"]})).await;
+        assert_eq!(os.calls(), applied_calls(&[route("10.0.0.0", "255.0.0.0")]));
+        assert!(lines.iter().any(|l| l.contains("ignoring") && l.contains("127.0.0.1/255.255.255.255")), "{:?}", lines);
+    }
+
+    #[tokio::test]
+    async fn profile_network_containing_the_gateway_keeps_the_gateway_out_of_the_tunnel() {
+        // O /32 do gateway pela interface física entra antes e é mais específico que a rede.
+        let (os, _state, _lines) = connect_profile(GatewayOptions::default(), json!({"tunnel_routes": ["127.0.0.0/8"]})).await;
+        assert_eq!(os.calls(), applied_calls(&[route("127.0.0.0", "255.0.0.0")]));
+    }
+
+    #[tokio::test]
+    async fn invalid_tunnel_route_is_refused_before_any_login() {
+        for bad in ["0.0.0.0/0", "10.0.0.0/33", "intranet"] {
+            let gw = FakeGateway::start(GatewayOptions::default()).await;
+            let (path, _session, os) = start_with_os(FakeOs::default()).await;
+            let mut c = client(&path).await;
+            let mut cmd = connect_cmd(&gw, PASSWORD);
+            cmd["profile"]["tunnel_routes"] = json!(["10.0.0.0/8", bad]);
+            c.send(cmd).await;
+            let r = c.recv_skipping_logs().await;
+            assert_eq!(r["ok"], false, "{}", r);
+            assert_eq!(r["error"], format!("Invalid tunnel route: {bad}"), "{}", r);
+            assert!(gw.realms().is_empty());
+            assert!(os.calls().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -985,7 +1127,7 @@ mod tests {
         // Servidores continuam os do gateway; só os domínios de match vêm do Profile.
         assert_eq!(state["dns_servers"], json!(XML_DNS.map(|d| d.to_string())));
         assert_eq!(state["dns_suffixes"], json!(["intra.example"]));
-        assert!(os.calls().contains(&OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: vec!["intra.example".into()] }));
+        assert!(os.calls().contains(&OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: vec!["intra.example".into()], global: false }));
         disconnect(&mut c).await;
         assert!(os.calls().contains(&OsCall::RemoveDns));
         assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
@@ -1007,6 +1149,7 @@ mod tests {
         OsCall::SetDns {
             servers: servers.iter().map(|s| s.parse().unwrap()).collect(),
             suffixes: suffixes.iter().map(|s| s.to_string()).collect(),
+            global: false,
         }
     }
 
@@ -1046,7 +1189,7 @@ mod tests {
         let mut cmd = connect_cmd(&gw, PASSWORD);
         cmd["profile"]["dns_fallback_servers"] = json!(["192.168.0.1"]);
         assert_eq!(connect_logging(&mut c, cmd).await.0["state"], "connected");
-        assert!(os.calls().contains(&OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec() }));
+        assert!(os.calls().contains(&OsCall::SetDns { servers: XML_DNS.to_vec(), suffixes: DNS_SUFFIXES.map(String::from).to_vec(), global: false }));
     }
 
     #[tokio::test]

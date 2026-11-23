@@ -66,6 +66,7 @@ impl VpnManager {
                     .unwrap_or_else(chrono::Utc::now),
                 dns_servers: payload.dns_servers.clone(),
                 dns_domains: payload.dns_domains.clone(),
+                full_tunnel: payload.full_tunnel,
             },
             "Disconnecting" => ConnectionState::Disconnecting,
             "Error" => ConnectionState::Error {
@@ -152,6 +153,42 @@ impl VpnManager {
         Ok(out)
     }
 
+    /// Limpa as redes pela VPN digitadas: apara, lê como CIDR IPv4 (um endereço sozinho vira /32),
+    /// zera os bits de host e descarta vazios e duplicados. Rejeita o que o `Route::parse_cidr` do
+    /// Helper recusaria, inclusive a /0: full tunnel não é algo que o Profile peça.
+    pub(crate) fn normalize_tunnel_routes(routes: &[String]) -> Result<Vec<String>, String> {
+        /// O mesmo limite do Helper (`MAX_TUNNEL_ROUTES`).
+        const MAX: usize = 256;
+        let mut out: Vec<String> = Vec::new();
+        for r in routes {
+            let r = r.trim();
+            if r.is_empty() {
+                continue;
+            }
+            let invalid = || format!("Invalid network: {} (use CIDR, like 10.0.0.0/8)", r);
+            let (addr, len) = match r.split_once('/') {
+                Some((addr, len)) if !len.is_empty() && len.bytes().all(|b| b.is_ascii_digit()) => {
+                    (addr, len.parse::<u32>().map_err(|_| invalid())?)
+                }
+                Some(_) => return Err(invalid()),
+                None => (r, 32),
+            };
+            let addr: std::net::Ipv4Addr = addr.parse().map_err(|_| invalid())?;
+            if !(1..=32).contains(&len) {
+                return Err(invalid());
+            }
+            let network = std::net::Ipv4Addr::from(u32::from(addr) & (u32::MAX << (32 - len)));
+            let cidr = format!("{}/{}", network, len);
+            if !out.contains(&cidr) {
+                out.push(cidr);
+            }
+        }
+        if out.len() > MAX {
+            return Err(format!("Too many networks: {} (at most {})", out.len(), MAX));
+        }
+        Ok(out)
+    }
+
     /// Começa a desconexão: põe o estado em Disconnecting e volta na hora.
     pub fn begin_disconnect(&mut self, app_handle: &AppHandle) {
         self.set_state(ConnectionState::Disconnecting, app_handle);
@@ -191,6 +228,7 @@ impl VpnManager {
     ) -> Result<VpnProfile, String> {
         let mut profile = VpnProfile {
             dns_match_domains: Self::normalize_dns_domains(&profile.dns_match_domains)?,
+            tunnel_routes: Self::normalize_tunnel_routes(&profile.tunnel_routes)?,
             ..profile
         };
         if !profile.id.is_empty() {
@@ -322,6 +360,22 @@ mod tests {
         for bad in ["corp_example.com", "-corp.com", "a;b.com"] {
             assert!(VpnManager::normalize_dns_domains(&[bad.to_string()]).is_err());
         }
+    }
+
+    #[test]
+    fn tunnel_routes_are_normalized_to_cidr_networks() {
+        let input: Vec<String> = [" 10.1.2.3/8 ", "10.0.0.0/8", "172.16.0.0/12", "192.0.2.7", "", "  "].map(String::from).to_vec();
+        assert_eq!(
+            VpnManager::normalize_tunnel_routes(&input),
+            Ok(["10.0.0.0/8", "172.16.0.0/12", "192.0.2.7/32"].map(String::from).to_vec())
+        );
+        assert_eq!(VpnManager::normalize_tunnel_routes(&[]), Ok(vec![]));
+        for bad in ["0.0.0.0/0", "10.0.0.0/33", "10.0.0.0/", "10.0.0/8", "corp.example.com", "::1/128"] {
+            let err = VpnManager::normalize_tunnel_routes(&[bad.to_string()]).unwrap_err();
+            assert!(err.starts_with("Invalid network"), "{bad}: {err}");
+        }
+        let many: Vec<String> = (0..257).map(|i| format!("10.{}.{}.0/24", i / 256, i % 256)).collect();
+        assert!(VpnManager::normalize_tunnel_routes(&many).unwrap_err().starts_with("Too many networks"));
     }
 
     #[test]

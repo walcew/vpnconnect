@@ -29,8 +29,12 @@ pub enum Cmd {
     #[command(long_about = "Show the VPN session: state, IP, connected since, expiry, DNS servers and \
         suffixes, and the Profile. After a disconnect, shows the reason and the cause (tunnel-dropped, \
         expired, login-failed).\n\n\
+        Full tunnel: when the session sends all of this machine's traffic through the VPN, the text says \
+        so in a warning line and the JSON has \"full_tunnel\": true (false in a split session). The \
+        organization behind the VPN can then see all of this traffic; only a human decides whether to \
+        keep it or limit the Profile with `profile edit --route`.\n\n\
         With --json, prints the Helper's state as-is (state, profile_id, ip, since, expires_at, \
-        dns_servers, dns_suffixes, url, reason, cause, cert_digest; only the fields of the current \
+        dns_servers, dns_suffixes, full_tunnel, url, reason, cause, cert_digest; only the fields of the current \
         state) plus \"profile\": {\"id\", \"name\"}, or null when no session is active. \"name\" is \
         null when the Profile no longer exists on this Mac.")]
     Status,
@@ -42,6 +46,8 @@ pub enum Cmd {
         no password flag), an OTP Profile needs --otp (else OTP_REQUIRED), --otp on a Check Point \
         Profile is refused with INVALID_ARGUMENT, extra_args only print a warning, and the DNS fallback setting applies. Refused with SESSION_ACTIVE when a session \
         is already active.\n\n\
+        If the session comes up in full tunnel (all of this machine's traffic through the VPN), a warning \
+        goes to stderr; the exit code is still 0.\n\n\
         SAML and Check Point: opens the login URL in the default browser and prints it on stderr; \
         --no-browser only prints it. The login at the identity provider is a human step. FortiToken push: stderr says it waits for the approval on the phone.\n\n\
         After --timeout seconds without a session, or on Ctrl-C, the pending login is cancelled \
@@ -75,7 +81,7 @@ pub enum Cmd {
             current state. It never gives up for a missing Helper. If the Helper refuses this user it exits \
             255 (HELPER_UNAUTHORIZED), since retrying would not help.",
         after_help = "Each line has an \"event\" field that says which one it is:\n\
-            \x20 {\"event\":\"state\",\"state\":\"connected\",\"profile_id\":\"…\",\"ip\":\"10.0.0.2\",\"since\":\"…\",\"expires_at\":\"…\",\"dns_servers\":[…],\"dns_suffixes\":[…],\"profile\":{\"id\":\"…\",\"name\":\"…\"}}\n\
+            \x20 {\"event\":\"state\",\"state\":\"connected\",\"profile_id\":\"…\",\"ip\":\"10.0.0.2\",\"since\":\"…\",\"expires_at\":\"…\",\"dns_servers\":[…],\"dns_suffixes\":[…],\"full_tunnel\":false,\"profile\":{\"id\":\"…\",\"name\":\"…\"}}\n\
             \x20   the session state, the same fields as `status --json` plus \"event\"; the other states are \"connecting\",\n\
             \x20   \"waiting-saml\" (with \"url\"), \"waiting-push\" and \"disconnected\" (with \"reason\", \"cause\" (tunnel-dropped, expired, login-failed) or \"cert_digest\" when they apply)\n\
             \x20 {\"event\":\"log\",\"line\":\"…\"}                                  a line of the Helper's session log\n\
@@ -88,9 +94,11 @@ pub enum Cmd {
     #[command(subcommand, long_about = "Manage the saved Profiles, the same ones the app shows. Every command \
         takes <profile> as the Profile id or its exact name; partial or ambiguous names are refused. \
         --json prints a Profile as {\"id\", \"name\", \"engine\" (fortinet|checkpoint), \"host\", \"port\", \"auth\" (password|saml), \"username\", \
-        \"realm\", \"otp_required\", \"auto_trust\", \"trusted_certs\", \"dns_domains\", \"has_password\"}; the \
+        \"realm\", \"otp_required\", \"auto_trust\", \"trusted_certs\", \"dns_domains\", \"routes\", \"has_password\"}; the \
         password itself is never printed. `ls` prints an array of them.\n\n\
-        Profile names are unique. Refusals (exit 1): PROFILE_NAME_TAKEN, INVALID_DNS_DOMAIN, \
+        \"routes\" are the networks that go through the VPN (--route). Empty, the gateway decides, and it may send \
+        everything through the VPN (full tunnel). Set, only those networks use the tunnel, whatever the gateway sends.\n\n\
+        Profile names are unique. Refusals (exit 1): PROFILE_NAME_TAKEN, INVALID_DNS_DOMAIN, INVALID_ROUTE, \
         INVALID_CERT_DIGEST. Bad usage (exit 255): INVALID_ARGUMENT.")]
     Profile(ProfileCmd),
     /// Show or change the app settings
@@ -171,7 +179,8 @@ pub enum ProfileCmd {
     /// Change only the fields passed and print the Profile
     #[command(long_about = "Change only the fields passed and print the resulting Profile. Fields not passed, \
         including trusted certificates, keep their value. --dns-domain replaces the whole list; \
-        --clear-dns-domains empties it. An empty --username or --realm clears it. The engine cannot \
+        --clear-dns-domains empties it. --route replaces the whole list of networks; --clear-routes \
+        empties it. An empty --username or --realm clears it. The engine cannot \
         be changed. On a Check Point Profile, --username, --otp-required and --auth password are refused \
         with INVALID_ARGUMENT; --realm is the login option.")]
     Edit {
@@ -255,12 +264,21 @@ pub struct Fields {
     /// Do not trust certificates automatically
     #[arg(long)]
     pub no_auto_trust: bool,
-    /// Split-DNS domain that uses the VPN DNS; repeat for several. Without any, the gateway's DNS suffixes apply
+    /// Split-DNS domain that uses the VPN DNS; repeat for several. Without any, the gateway's DNS suffixes apply.
+    /// In full tunnel the VPN DNS resolves every name and these are only search domains
     #[arg(long = "dns-domain", value_name = "DOMAIN", conflicts_with = "clear_dns_domains")]
     pub dns_domains: Vec<String>,
     /// Empty the DNS domains list
     #[arg(long)]
     pub clear_dns_domains: bool,
+    /// Network that goes through the VPN, in CIDR (10.0.0.0/8; an address alone is a /32); repeat for several.
+    /// When set, only these networks use the tunnel and the gateway's routes, full tunnel included, are ignored.
+    /// Without any, the gateway's routes apply
+    #[arg(long = "route", value_name = "CIDR", conflicts_with = "clear_routes")]
+    pub routes: Vec<String>,
+    /// Empty the networks list: the gateway's routes apply again
+    #[arg(long)]
+    pub clear_routes: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]

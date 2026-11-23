@@ -17,6 +17,8 @@ export interface VpnProfile {
   trusted_certs: string[];
   ignore_cert_errors: boolean;
   dns_match_domains: string[];
+  /** Redes pela VPN (CIDR). Ausente ou vazio: valem as rotas do gateway. */
+  tunnel_routes?: string[];
   extra_args: string[];
 }
 
@@ -35,6 +37,8 @@ export interface ConnectionStatus {
   message: string | null;
   dns_servers: string[];
   dns_domains: string[];
+  /** Todo o tráfego da máquina passa pela VPN (questão de privacidade). */
+  full_tunnel: boolean;
 }
 
 export interface LogLine {
@@ -74,6 +78,7 @@ export function newProfile(): VpnProfile {
     trusted_certs: [],
     ignore_cert_errors: false,
     dns_match_domains: [],
+    tunnel_routes: [],
     extra_args: [],
   };
 }
