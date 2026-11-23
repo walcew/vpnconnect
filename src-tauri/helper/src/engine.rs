@@ -69,12 +69,31 @@ pub struct Tunnel {
     task: JoinHandle<String>,
     /// Pede ao Engine uma sondagem fora do intervalo.
     probe: Arc<Notify>,
+    /// Pede à task que se despeça do gateway pelo túnel e termine.
+    stop: Option<Arc<Notify>>,
 }
 
 impl Tunnel {
     /// `task` conduz o túnel e devolve o motivo da queda; `probe` dispara uma sondagem imediata.
     pub fn new(task: JoinHandle<String>, probe: Arc<Notify>) -> Self {
-        Self { task, probe }
+        Self { task, probe, stop: None }
+    }
+
+    /// Para o Engine cujo túnel tem despedida (o `disconnect` do Check Point): `close` notifica
+    /// `stop` antes de abortar.
+    pub fn with_stop(mut self, stop: Arc<Notify>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// Fecha o túnel. Com `stop`, a task tem até `deadline` para se despedir do gateway; depois
+    /// (ou sem `stop`) é abortada.
+    pub async fn close(mut self, deadline: Duration) {
+        // Um JoinHandle já concluído não pode ser esperado de novo.
+        if let (Some(stop), false) = (&self.stop, self.task.is_finished()) {
+            stop.notify_one();
+            let _ = tokio::time::timeout(deadline, &mut self.task).await;
+        }
     }
 
     /// Espera o túnel cair e devolve o motivo.

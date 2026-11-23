@@ -19,6 +19,8 @@ use crate::LogFn;
 const GOOGLE_DNS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8, 4, 4)];
 /// Prazo do logout no disconnect pedido pelo usuário: gateway mudo não segura a desconexão.
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Prazo da despedida pelo túnel antes de abortá-lo: TCP meio aberto não segura a desconexão.
+const TUNNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Resolução da velocidade que a GUI calcula; mais curto pesa sem ganho visível.
 const BANDWIDTH_INTERVAL: Duration = Duration::from_secs(1);
@@ -438,7 +440,7 @@ impl Session {
             }
             Err(e) => {
                 self.teardown();
-                drop(tunnel);
+                tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
                 self.logout(engine).await;
                 return End::Failed(e);
             }
@@ -459,7 +461,7 @@ impl Session {
             inner.stopping
         };
         if stopped {
-            drop(tunnel);
+            tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
             self.teardown();
             self.logout(engine).await;
             return End::Stopped;
@@ -492,7 +494,7 @@ impl Session {
                 }
             }
         };
-        drop(tunnel);
+        tunnel.close(TUNNEL_CLOSE_TIMEOUT).await;
         self.teardown();
         // Sem logout na queda nem na expiração: o gateway não responde ou já encerrou a sessão,
         // e o prazo do logout só atrasaria o `disconnected`.

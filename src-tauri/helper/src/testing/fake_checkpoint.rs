@@ -1,12 +1,13 @@
 //! Gateway Check Point falso em loopback, sobre o apoio comum de `fake_server`. Implementa o canal
 //! de controle (`POST /clients/`: informações do servidor, início do login pelo IdP, resposta do
 //! desafio, `ClientSettings` com as faixas de rede e signout) e o lado servidor do túnel SSL
-//! (`client_hello`, `hello_reply`, quadros de dados e keepalive). As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
+//! (`client_hello`, `hello_reply`, quadros de dados, keepalive e `disconnect`). Como o gateway de
+//! validação, responde 699 ao `Signout` de uma sessão cujo túnel já foi aberto. As respostas são texto escrito à mão a partir de `docs/checkpoint-protocol.md`;
 //! só a leitura dos pedidos e a ofuscação usam o codec do Engine, que tem testes de unidade próprios.
 //! Modos novos entram como campos em `CheckpointOptions`.
 
 use std::net::Ipv4Addr;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -77,7 +78,9 @@ struct Shared {
     close_tunnel: Notify,
     stop_reading: Notify,
     send_disconnect: Notify,
-    /// Pedidos do canal de controle, na ordem em que chegaram.
+    /// O túnel da sessão chegou ao `hello_reply`.
+    tunnel_opened: AtomicBool,
+    /// Pedidos do canal de controle e `disconnect` do cliente pelo túnel, na ordem em que chegaram.
     requests: Mutex<Vec<Sexp>>,
     from_client: mpsc::UnboundedSender<Vec<u8>>,
     to_client: Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>,
@@ -109,6 +112,7 @@ impl FakeCheckpoint {
             close_tunnel: Notify::new(),
             stop_reading: Notify::new(),
             send_disconnect: Notify::new(),
+            tunnel_opened: AtomicBool::new(false),
             requests: Mutex::new(Vec::new()),
             from_client: from_tx,
             to_client: Mutex::new(Some(to_rx)),
@@ -164,7 +168,7 @@ impl FakeCheckpoint {
         self.shared.send_disconnect.notify_one();
     }
 
-    /// Pedidos do canal de controle recebidos até agora.
+    /// Pedidos do canal de controle e quadros `disconnect` do cliente recebidos até agora.
     pub fn requests(&self) -> Vec<Sexp> {
         self.shared.requests.lock().unwrap().clone()
     }
@@ -241,7 +245,13 @@ async fn handle<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(mut stream: 
                 let _ = stream.read(&mut [0u8; 1]).await; // segura a conexão até o cliente desistir
                 return;
             }
-            response("Signout", SESSION_ID, "")
+            let signout = response("Signout", SESSION_ID, "");
+            // O gateway de validação responde 699 ao Signout depois do túnel: a sessão já acabou.
+            if shared.tunnel_opened.load(Ordering::SeqCst) {
+                signout.replace(":return_code (600)", ":return_code (699)")
+            } else {
+                signout
+            }
         }
         _ => response(&kind, "", "\t\t:authn_status (failed)"),
     };
@@ -336,6 +346,7 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
         return;
     }
     let _ = wr.write_all(&control(&hello_reply(&shared.options))).await;
+    shared.tunnel_opened.store(true, Ordering::SeqCst);
 
     let (frames_tx, mut frames) = mpsc::unbounded_channel::<(u32, Vec<u8>)>();
     let reader = shared.clone();
@@ -362,7 +373,9 @@ async fn tunnel<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(stream: S, f
                 Some((DATA, packet)) => { let _ = shared.from_client.send(packet); }
                 Some((CONTROL, text)) => {
                     let text = sexp::parse(&String::from_utf8_lossy(&text)).expect("control frame is not an S-expression");
-                    if text.name() == Some("keepalive") {
+                    if text.name() == Some("disconnect") {
+                        shared.requests.lock().unwrap().push(text);
+                    } else if text.name() == Some("keepalive") {
                         let n = shared.keepalives.fetch_add(1, Ordering::SeqCst);
                         if shared.options.keepalive_answers.is_none_or(|answers| n < answers) {
                             let _ = wr.write_all(&control("(keepalive\n\t:id (0))")).await;

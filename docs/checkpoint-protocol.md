@@ -224,4 +224,10 @@ A lista `range` vazia pede a política de faixas sem versão conhecida (**inf**)
 
 ## Signout
 
-No `disconnect` do usuário, a sessão fecha o túnel, desfaz a rede e manda o pedido `Signout` com o `session_id` da sessão no cabeçalho e `:RequestData ()`, dentro do prazo curto que a sessão já impõe: um gateway mudo não segura a desconexão.
+No `disconnect` do usuário, na ordem do cpyvpn (**ref**):
+
+1. O cliente se despede pelo túnel com o quadro de controle `(disconnect :code (28) :message ("User disconnected"))`, o mesmo código que o gateway usa ao encerrar a sessão, e fecha o TLS. A despedida tem 1 s; um TCP meio aberto não segura a desconexão. Na queda e na expiração com o túnel ainda de pé a despedida também sai.
+2. A sessão desfaz a rede.
+3. O Engine manda o pedido `Signout` com o `session_id` da sessão no cabeçalho, `:protocol_version (100)` e `:RequestData ()`, dentro do prazo curto que a sessão já impõe: um gateway mudo não segura a desconexão.
+
+Antes o Engine fechava o túnel sem o quadro `disconnect` e só mandava o `Signout`, no mesmo formato acima; o gateway de validação respondia `return_code (699)` (**obs**). O formato do pedido é o mesmo dos dois clientes de referência, e os dois também recebem erro nesse passo: o snx-rs viu o 699 num gateway de usuário e deixou de mandar o `Signout` no túnel SSL, e o cpyvpn trata o erro como esperado em gateways R81 (**ref**). Por isso o Engine aceita o 699 ao `Signout` como sessão já encerrada, com uma linha no log, e não como falha do logout. Que o quadro `disconnect` encerra a sessão no gateway é **inf**, a confirmar no gateway de validação.

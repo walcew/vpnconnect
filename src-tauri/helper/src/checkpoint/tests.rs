@@ -130,7 +130,9 @@ async fn idp_login_connects_and_applies_the_gateway_network_without_leaking_secr
         }
     }
     assert_eq!(gw.logouts(), 1);
+    // O 699 do gateway ao `Signout` depois do túnel não é falha do logout.
     assert!(frames.iter().any(|f| f["line"] == "logged out"), "no signout log");
+    assert!(frames.iter().any(|f| f["line"].as_str().is_some_and(|l| l.contains("return code 699"))), "no 699 log");
     let secrets = [ACTIVE_KEY.to_string(), crate::checkpoint::sexp::obfuscate(ACTIVE_KEY.as_bytes()), IDP_CODE.to_string()];
     for f in &frames {
         for secret in &secrets {
@@ -306,6 +308,11 @@ async fn disconnect_signs_out_at_the_gateway_and_tears_everything_down() {
     let state = disconnect(&mut c).await;
     assert_eq!(state, json!({"v": 2, "type": "event", "event": "state", "state": "disconnected"}));
     assert_eq!(gw.logouts(), 1);
+    // Como o cpyvpn: `disconnect` pelo túnel antes do `Signout`, que o gateway responde com 699.
+    let tail: Vec<_> = gw.requests().iter().rev().take(2).map(|r| r.text("RequestHeader:type").or(r.name()).unwrap_or_default().to_string()).collect();
+    assert_eq!(tail, ["Signout", "disconnect"]);
+    let farewell = gw.requests().into_iter().find(|r| r.name() == Some("disconnect")).unwrap();
+    assert_eq!(farewell.text("code"), Some("28"));
     assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
     assert_eq!(os.saved_state(), None);
     assert!(os.calls().contains(&OsCall::Down) && os.calls().contains(&OsCall::RemoveDns));

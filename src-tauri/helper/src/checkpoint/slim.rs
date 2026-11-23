@@ -83,14 +83,21 @@ fn keepalive() -> Vec<u8> {
     control(&Sexp::obj("keepalive", vec![("id", Sexp::val("0"))]))
 }
 
+/// A despedida do cliente: `disconnect` com o código 28, o mesmo que o gateway usa ao encerrar a sessão.
+pub fn disconnect() -> Vec<u8> {
+    control(&Sexp::obj("disconnect", vec![("code", Sexp::val("28")), ("message", Sexp::val("User disconnected"))]))
+}
+
 /// Conduz o túnel até ele cair e devolve o motivo. Pacotes IP fluem entre o stream e o canal da
 /// interface, e um `keepalive` sai a cada `interval` e a cada `probe`. Três intervalos seguidos
-/// sem resposta ao keepalive derrubam o túnel.
+/// sem resposta ao keepalive derrubam o túnel. `stop` encerra a sessão: manda o `disconnect`,
+/// fecha o TLS e termina.
 pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
     mut stream: S,
     mut buf: Vec<u8>,
     interval: Duration,
     probe: Arc<Notify>,
+    stop: Arc<Notify>,
     to_iface: mpsc::Sender<Vec<u8>>,
     mut from_iface: mpsc::Receiver<Vec<u8>>,
 ) -> String {
@@ -135,6 +142,11 @@ pub async fn run<S: AsyncRead + AsyncWrite + Unpin>(
                 keepalive()
             }
             _ = probe.notified() => keepalive(),
+            _ = stop.notified() => {
+                let _ = write(&mut stream, &disconnect(), deadline).await;
+                let _ = stream.shutdown().await;
+                return "Tunnel closed by the client".into();
+            }
         };
         if let Err(e) = write(&mut stream, &out, deadline).await {
             return e;

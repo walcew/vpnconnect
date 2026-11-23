@@ -45,6 +45,8 @@ const MAX_ERROR_MESSAGE: usize = 200;
 const CLIENT_TYPE: &str = "TRAC";
 /// Retorno de sucesso no cabeçalho das respostas do canal de controle.
 const RETURN_OK: &str = "600";
+/// Retorno do `Signout` depois que o túnel fechou: a sessão já não existe no gateway.
+const RETURN_SIGNED_OUT: &str = "699";
 const MAX_LOGIN_OPTION_LEN: usize = 64;
 /// Tetos das faixas de rede anunciadas e das rotas que elas viram.
 const MAX_RANGES: usize = 1024;
@@ -137,6 +139,12 @@ impl CheckPoint {
         }
         let reply = sexp::parse(&String::from_utf8_lossy(&resp.body)).map_err(|e| format!("Invalid gateway answer to {}: {}", kind, e))?;
         let code = reply.text("ResponseHeader:return_code").unwrap_or_default();
+        // O gateway de validação responde 699 ao `Signout` depois do túnel fechado, como o snx-rs e o
+        // cpyvpn também viam: quem encerra a sessão é o `disconnect` do túnel.
+        if kind == "Signout" && code == RETURN_SIGNED_OUT {
+            (self.log)(format!("Signout answered with return code {}: the gateway had already closed the session", code));
+            return Ok(Sexp::val(""));
+        }
         if reply.name() != Some("CCCserverResponse") || code != RETURN_OK {
             return Err(format!("Gateway answered the request {} with return code {:?}", kind, code));
         }
@@ -370,8 +378,8 @@ impl engine::Engine for CheckPoint {
 
         let (to_iface, rx) = mpsc::channel(256);
         let (tx, from_iface) = mpsc::channel(256);
-        let probe = Arc::new(Notify::new());
-        let task = tokio::spawn(slim::run(stream, buf, keepalive, probe.clone(), to_iface, from_iface));
+        let (probe, stop) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let task = tokio::spawn(slim::run(stream, buf, keepalive, probe.clone(), stop.clone(), to_iface, from_iface));
         let config = TunnelConfig {
             gateway,
             ip,
@@ -384,7 +392,7 @@ impl engine::Engine for CheckPoint {
             mtu: DEFAULT_MTU,
             expires_at: auth_timeout.map(|s| login_started + chrono::Duration::seconds(s as i64)),
         };
-        Ok((config, Packets { tx, rx }, Tunnel::new(task, probe)))
+        Ok((config, Packets { tx, rx }, Tunnel::new(task, probe).with_stop(stop)))
     }
 
     async fn logout(&self) -> Result<(), String> {
