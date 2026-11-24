@@ -3,7 +3,7 @@ members = [".", "helper"]
 
 [package]
 name = "vpnconnect"
-version = "0.8.1"
+version = "0.8.2"
 description = "VPN Connect - A macOS VPN client"
 authors = ["you"]
 license = "MIT"
