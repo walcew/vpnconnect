@@ -46,13 +46,18 @@ pub fn bind(path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// Atende até `shutdown` voltar; aí encerra a sessão ativa antes de sair, para não deixar
+/// DNS e rotas aplicados com o Helper parado.
+pub async fn run(shutdown: impl std::future::Future<Output = ()>) -> Result<(), Box<dyn std::error::Error>> {
     let listener = bind(Path::new(SOCKET_PATH))?;
     log::info!("Listening on {}", SOCKET_PATH);
     let session = Arc::new(Session::new(Arc::new(SystemOs::default())));
     let watched = session.clone();
     tokio::spawn(async move { net::watch::run(|| watched.network_changed()).await });
-    serve(listener, session, console_authorizer()).await;
+    tokio::select! {
+        _ = serve(listener, session.clone(), console_authorizer()) => {}
+        _ = shutdown => session.shutdown().await,
+    }
     Ok(())
 }
 

@@ -22,6 +22,9 @@ const GOOGLE_DNS: [Ipv4Addr; 2] = [Ipv4Addr::new(8, 8, 8, 8), Ipv4Addr::new(8, 8
 const LOGOUT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Parte do `LOGOUT_TIMEOUT` da despedida pelo túnel antes de abortá-lo: TCP meio aberto não a segura.
 const TUNNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Prazo do encerramento no SIGTERM: despedida e logout, com folga, bem abaixo dos 20 s
+/// que o launchd espera antes do SIGKILL.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Resolução da velocidade que a GUI calcula; mais curto pesa sem ganho visível.
 const BANDWIDTH_INTERVAL: Duration = Duration::from_secs(1);
@@ -341,6 +344,26 @@ impl Session {
     pub fn disconnect(&self) {
         if !Self::stop(&mut self.inner.lock().unwrap()) {
             self.log("disconnect: no active session");
+        }
+    }
+
+    /// Helper saindo (SIGTERM/SIGINT): para a sessão como o `disconnect` e espera o fim. Se ela não
+    /// acabar no prazo, desfaz a rede direto, porque o processo vai sair de qualquer jeito.
+    pub async fn shutdown(&self) {
+        let mut events = self.subscribe();
+        if !Self::stop(&mut self.inner.lock().unwrap()) {
+            return;
+        }
+        self.log("shutdown: ending the active session");
+        let ended = async {
+            // `cancel` volta a None sob o lock antes do evento `disconnected`; Lagged só repete a checagem.
+            while self.inner.lock().unwrap().cancel.is_some() {
+                let _ = events.recv().await;
+            }
+        };
+        if tokio::time::timeout(SHUTDOWN_TIMEOUT, ended).await.is_err() {
+            self.log("shutdown: session did not end in time, undoing the network");
+            self.teardown();
         }
     }
 
@@ -1220,6 +1243,23 @@ mod tests {
         assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
         assert_eq!(os.saved_state(), None);
         assert!(os.calls().contains(&OsCall::Down));
+    }
+
+    #[tokio::test]
+    async fn shutdown_logs_out_and_tears_everything_down_before_returning() {
+        let (gw, _c, os, _state, session) = connected_session(crate::fortinet::ECHO_INTERVAL, GatewayOptions::default()).await;
+        session.shutdown().await;
+        assert_eq!(gw.logouts(), 1);
+        assert!(os.applied().is_empty(), "left behind: {:?}", os.applied());
+        assert_eq!(os.saved_state(), None);
+        assert!(matches!(session.state(), super::State::Disconnected { .. }));
+    }
+
+    #[tokio::test]
+    async fn shutdown_without_session_returns_at_once() {
+        let (_path, session, os) = start_with_keepalive(crate::fortinet::ECHO_INTERVAL).await;
+        session.shutdown().await;
+        assert!(os.calls().is_empty(), "{:?}", os.calls());
     }
 
     #[tokio::test]

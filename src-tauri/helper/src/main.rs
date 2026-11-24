@@ -28,22 +28,14 @@ async fn main() {
         env!("CARGO_PKG_VERSION")
     );
 
-    // Run server with graceful shutdown on SIGTERM/SIGINT
-    tokio::select! {
-        result = server::run() => {
-            if let Err(e) = result {
-                log::error!("Server error: {}", e);
-                std::process::exit(1);
-            }
-        }
-        _ = shutdown_signal() => {
-            log::info!("Shutdown signal received, cleaning up");
-            // Remove socket file on clean shutdown
-            let socket_path = Path::new(server::SOCKET_PATH);
-            if socket_path.exists() {
-                let _ = fs::remove_file(socket_path);
-            }
-        }
+    // No SIGTERM/SIGINT, o server encerra a sessão ativa antes de voltar.
+    if let Err(e) = server::run(shutdown_signal()).await {
+        log::error!("Server error: {}", e);
+        std::process::exit(1);
+    }
+    let socket_path = Path::new(server::SOCKET_PATH);
+    if socket_path.exists() {
+        let _ = fs::remove_file(socket_path);
     }
 
     log::info!("vpnconnect-helper stopped");
