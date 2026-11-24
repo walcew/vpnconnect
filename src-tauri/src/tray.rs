@@ -183,10 +183,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
 
     match id.as_str() {
         "show" => {
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
+            crate::show_main_window(app);
         }
         "quit" => {
             let app = app.clone();
@@ -227,10 +224,7 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 };
                 if let (Some(profile_id), true) = (&profile_id, needs_otp) {
                     // O OTP é digitado na janela principal; o diálogo então conecta.
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    crate::show_main_window(&app);
                     let _ = app.emit("otp-requested", OtpRequestedPayload { profile_id: profile_id.clone() });
                 } else if let Some(profile_id) = profile_id {
                     let settings = crate::settings_store::SettingsStore::new()

@@ -14,7 +14,7 @@ pub mod cli;
 
 use std::sync::Mutex;
 
-use tauri::{Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 
 use vpn_manager::VpnManager;
 
@@ -66,6 +66,9 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.hide();
                 api.prevent_close();
+                // Com a janela fechada o app vive só na tray, sem ícone no Dock (#6).
+                #[cfg(target_os = "macos")]
+                let _ = window.app_handle().set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
         })
         .build(tauri::generate_context!())
@@ -74,11 +77,18 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             if let RunEvent::Reopen { has_visible_windows, .. } = event {
                 if !has_visible_windows {
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    show_main_window(app_handle);
                 }
             }
         });
+}
+
+/// Mostra a janela principal; com ela visível o app volta ao Dock e ao Cmd+Tab.
+pub fn show_main_window(app: &AppHandle) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
